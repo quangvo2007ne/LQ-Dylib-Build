@@ -105,6 +105,10 @@ void lq_hide_log(void) {
 // LẤY SLIDE AN TOÀN (không dùng _dyld_get_image_name bị hook)
 // =========================================================
 static uintptr_t get_awss3_slide_safe(void) {
+    // Constructor 7 hook cả _dyld_get_image_name lẫn dladdr để ẩn AWSS3.
+    // Không dùng cả hai. Tính slide thuần túy từ IMP:
+    //   slide = runtime_IMP - va_unslid
+    // VA unslid của initTapGes = 0x02F04DC4 (từ objc_interfaces.h)
     Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
     if (!cls) { lq_log(@"❌ SLIDE: objc_getClass fail"); return 0; }
 
@@ -114,15 +118,10 @@ static uintptr_t get_awss3_slide_safe(void) {
     IMP imp = method_getImplementation(m);
     if (!imp) { lq_log(@"❌ SLIDE: getImplementation fail"); return 0; }
 
-    Dl_info info;
-    if (dladdr((void *)imp, &info) == 0 || !info.dli_fbase) {
-        lq_log(@"❌ SLIDE: dladdr fail");
-        return 0;
-    }
-
-    // VA unslid của initTapGes = 0x02F04DC4 (từ objc_interfaces.h)
-    uintptr_t slide = (uintptr_t)imp - 0x02F04DC4;
-    lq_log(@"✅ SLIDE OK: imp=%p fbase=%p slide=0x%lX", (void*)imp, info.dli_fbase, slide);
+    // Tính slide trực tiếp — không cần dladdr
+    uintptr_t va_unslid = 0x02F04DC4;
+    uintptr_t slide = (uintptr_t)imp - va_unslid;
+    lq_log(@"✅ SLIDE OK: imp=%p va=0x%lX slide=0x%lX", (void*)imp, va_unslid, slide);
     return slide;
 }
 

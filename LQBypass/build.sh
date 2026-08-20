@@ -1,33 +1,22 @@
 #!/bin/bash
-# =========================================================================
-# Script build LQBypass.dylib trên macOS / Linux (với iOS SDK)
-# =========================================================================
+set -e
 
 echo "=== Đang biên dịch LQBypass.dylib cho iOS ARM64 ==="
 
-SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+echo "SDK Path: $SDK_PATH"
 
-if [ -z "$SDK_PATH" ]; then
-    echo "Dùng clang mặc định với target iOS..."
-    clang -target arm64-apple-ios14.0 \
-          -dynamiclib \
-          -framework Foundation \
-          -framework UIKit \
-          -fobjc-arc \
-          -O2 \
-          -o LQBypass.dylib \
-          LQBypass.m
-else
-    echo "Dùng Xcode iOS SDK: $SDK_PATH"
-    clang -isysroot "$SDK_PATH" \
-          -arch arm64 \
-          -dynamiclib \
-          -framework Foundation \
-          -framework UIKit \
-          -fobjc-arc \
-          -O2 \
-          -o LQBypass.dylib \
-          LQBypass.m
-fi
+clang -isysroot "$SDK_PATH" \
+      -arch arm64 \
+      -target arm64-apple-ios14.0 \
+      -dynamiclib \
+      -framework Foundation \
+      -framework UIKit \
+      -fobjc-arc \
+      -O2 \
+      -o LQBypass.dylib \
+      LQBypass.m
 
-echo "=== Hoàn tất: LQBypass.dylib đã được tạo! ==="
+echo "=== Kiểm tra file sau biên dịch ==="
+ls -la LQBypass.dylib
+file LQBypass.dylib

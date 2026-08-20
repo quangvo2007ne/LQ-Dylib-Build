@@ -1,5 +1,4 @@
-// LQBypass.m – Full bypass for Liên Quân Mobile AWSS3 mod
-// Version 3.1 – Fixed all identified gaps & safe objc_super handling
+// LQBypass.m – Full bypass without fake payload (force menu bootstrap)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -96,7 +95,6 @@ uintptr_t get_awss3_base_slide(void) {
             [instance performSelector:@selector(setupFloatingToggleButtons)];
             NSLog(@"[LQBypass] ✅ setupFloatingToggleButtons called");
         }
-        
         // Clean overlays again
         [LQBypassHelper dismissAllOverlays];
     });
@@ -153,15 +151,19 @@ void perform_swizzles(void) {
         if (m) method_setImplementation(m, (IMP)dummy_imp);
     }
 
-    // 2. Block FWEncryptorAES decrypt
+    // 2. Bypass FWEncryptorAES decrypt: force bootstrapping menu
     Class fwEnc = objc_getClass("FWEncryptorAES");
     if (fwEnc) {
         SEL decSel = NSSelectorFromString(@"decrypt:Key:IV:");
         Method m = class_getClassMethod(fwEnc, decSel);
         if (m) {
             IMP newImp = imp_implementationWithBlock(^id(id self, NSData *cipher, NSData *key, NSData *iv) {
-                NSLog(@"[LQBypass] Bypassing FWEncryptorAES decrypt");
-                return [[NSData alloc] init];
+                NSLog(@"[LQBypass] decrypt called, forcing mod menu bootstrap");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [LQBypassHelper bootstrapModMenu];
+                });
+                // Return empty data to keep flow safe (won't be used)
+                return [NSData data];
             });
             method_setImplementation(m, newImp);
         }
@@ -249,6 +251,16 @@ void perform_swizzles(void) {
 }
 
 // =========================================================================
+//  Constructor 6 patch (optional but recommended)
+// =========================================================================
+void patch_constructor6(void) {
+    uintptr_t slide = get_awss3_base_slide();
+    if (!slide) return;
+    uintptr_t addr = slide + 0x02F0499C;
+    NSLog(@"[LQBypass] Constructor 6 patch skipped (needs vm_protect).");
+}
+
+// =========================================================================
 //  Entry point
 // =========================================================================
 __attribute__((constructor))
@@ -257,34 +269,28 @@ static void lq_bypass_init(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         perform_swizzles();
+        patch_constructor6();
     });
 
+    // When app finishes launching
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         NSLog(@"[LQBypass] App finished launching.");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [LQBypassHelper bootstrapModMenu];
             [LQBypassHelper dismissAllOverlays];
         });
     }];
 
-    // Fallback: after 2.5 seconds if notification didn't fire
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+    // Fallback: after 3 seconds if notification didn't fire
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [LQBypassHelper bootstrapModMenu];
         [LQBypassHelper dismissAllOverlays];
     });
-
-    // Sweeper to clean any HUDs appearing in the first 8 seconds
-    for (float delay = 0.5; delay <= 8.0; delay += 0.5) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [LQBypassHelper dismissAllOverlays];
-        });
-    }
 
     // Double-tap two fingers to toggle ImGui
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),

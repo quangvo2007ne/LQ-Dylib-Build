@@ -1,6 +1,6 @@
 // =========================================================================
 //  LQBypass.m — Tweak Dylib Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 8.2: Chỉ Gọi Completion Block, Không Fake NetTool
+//  Phiên bản 8.3: Sửa lỗi Crash Block + Phục hồi NetToolFake
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -34,7 +34,6 @@ uintptr_t get_awss3_base_slide(void) {
 @end
 
 @implementation LQBypassHelper
-
 + (void)openModMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
@@ -54,7 +53,6 @@ uintptr_t get_awss3_base_slide(void) {
             }
         }
 
-        // Mở _UIOverlayPresentationController
         Class menuVCCls = objc_getClass("_UIOverlayPresentationController");
         if (!menuVCCls) return;
 
@@ -63,7 +61,6 @@ uintptr_t get_awss3_base_slide(void) {
             return;
         }
 
-        // Reset guard 0x36C0D00
         uintptr_t slide = get_awss3_base_slide();
         if (slide) {
             uint8_t *guard = (uint8_t *)(slide + 0x36C0D00);
@@ -81,15 +78,92 @@ uintptr_t get_awss3_base_slide(void) {
 @end
 
 // ------------------------------------------------------------
-// Hook validateKey: luôn trả về YES
+// 3. Fake NetTool Response (Kết hợp Inject State)
 // ------------------------------------------------------------
-static BOOL fake_validateKey(id self, SEL _cmd, NSString *key) {
-    NSLog(@"[LQBypass] 🔑 validateKey được gọi -> luôn YES");
-    return YES;
+@interface NetToolFake : NSObject
++ (id)Post_AppendURL:(id)url myparameters:(id)params mysuccess:(id)success myfailure:(id)failure;
++ (BOOL)verifySignature:(id)signature withData:(id)data usingPublicKeyString:(id)key;
+@end
+
+@implementation NetToolFake
++ (id)Post_AppendURL:(id)url myparameters:(id)params mysuccess:(id)success myfailure:(id)failure {
+    NSString *urlStr = [url description];
+    NSLog(@"[LQBypass] 🌐 NetTool POST: %@", urlStr);
+
+    NSDictionary *fakeResponse = nil;
+    NSTimeInterval currentUnix = [[NSDate date] timeIntervalSince1970];
+    NSNumber *unixNum = @((long long)currentUnix);
+
+    if ([urlStr containsString:@"package-v3"]) {
+        NSDictionary *pkgData = @{
+            @"packageName": @"com.garena.game.kgvn",
+            @"name": @"LienQuanMobile",
+            @"ip": @"127.0.0.1"
+        };
+        fakeResponse = @{
+            @"code": @200,
+            @"status": @"success",
+            @"success": @YES,
+            @"unix": unixNum,
+            @"data": pkgData
+        };
+    } else if ([urlStr containsString:@"credential-v3"] || [urlStr containsString:@"key-v3"]) {
+        NSDictionary *authData = @{
+            @"key": @"VIP-LIFETIME-2099",
+            @"status": @"active",
+            @"package": @"AOV",
+            @"license": @"VIP",
+            @"expiredAt": @"2099-12-31 23:59:59",
+            @"id": @"88888888"
+        };
+        fakeResponse = @{
+            @"code": @200,
+            @"status": @"success",
+            @"success": @YES,
+            @"unix": unixNum,
+            @"data": authData
+        };
+    } else {
+        fakeResponse = @{
+            @"code": @200,
+            @"status": @"success",
+            @"success": @YES,
+            @"unix": unixNum,
+            @"data": @{}
+        };
+    }
+
+    if (success) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                // TIÊM STATE TRƯỚC KHI GỌI BLOCK CỦA GAME!
+                uintptr_t slide = get_awss3_base_slide();
+                if (slide) {
+                    NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
+                    void (*set_token_func)(id) = (void (*)(id))(slide + 0x00CB80A0);
+                    set_token_func(seed);
+                    NSLog(@"[LQBypass] ✅ Đã Inject Seed State vào hệ thống!");
+                }
+
+                // Gọi Block xịn của game
+                void (^succBlock)(id, id) = (void (^)(id, id))success;
+                succBlock(fakeResponse, nil);
+                NSLog(@"[LQBypass] ✅ Đã gọi completion block mạng thành công!");
+            } @catch (NSException *e) {
+                NSLog(@"[LQBypass] Exception calling success block: %@", e);
+            }
+        });
+    }
+    return nil;
 }
 
++ (BOOL)verifySignature:(id)signature withData:(id)data usingPublicKeyString:(id)key {
+    return YES;
+}
+@end
+
 // ------------------------------------------------------------
-// Anti-Debug hooks
+// Anti-Debug hooks (Fishhook)
 // ------------------------------------------------------------
 static int (*orig_ptrace)(int, pid_t, caddr_t, int);
 static int (*orig_sysctl)(int*, u_int, void*, size_t*, void*, size_t);
@@ -122,46 +196,6 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
 }
 
 // ------------------------------------------------------------
-// Gọi trực tiếp completion block 0x02F085B4
-// ------------------------------------------------------------
-void force_bootstrap_menu(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        uintptr_t slide = get_awss3_base_slide();
-        if (!slide) return;
-
-        // Set token
-        NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
-        void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
-        if (set_token) set_token(seed);
-
-        // Block tạo menu
-        void (*menu_block)(id, id) = (void (*)(id, id))(slide + 0x02F085B4);
-        NSDictionary *fakeResp = @{
-            @"status": @"success",
-            @"unix": @((long long)[[NSDate date] timeIntervalSince1970]),
-            @"code": @200,
-            @"success": @YES,
-            @"data": @{
-                @"key": @"VIP-LIFETIME-2099",
-                @"status": @"active",
-                @"package": @"AOV",
-                @"license": @"VIP",
-                @"expiredAt": @"2099-12-31 23:59:59",
-                @"id": @"88888888"
-            }
-        };
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (menu_block) {
-                menu_block(fakeResp, nil);
-                NSLog(@"[LQBypass] ✅ Đã gọi completion block");
-            }
-        });
-    });
-}
-
-// ------------------------------------------------------------
 // Swizzles
 // ------------------------------------------------------------
 void swizzleMethod(Class cls, SEL sel, IMP newImp) {
@@ -175,6 +209,7 @@ void swizzleMethod(Class cls, SEL sel, IMP newImp) {
 static void dummy_imp(id self, SEL _cmd, ...) {}
 static id fake_udid_imp(id self, SEL _cmd) { return @"00000000-0000-0000-0000-000000000000"; }
 static void dummy_save_udid(id self, SEL _cmd, id udid) {}
+static BOOL fake_validateKey(id self, SEL _cmd, NSString *key) { return YES; }
 
 void perform_swizzles(void) {
     static dispatch_once_t once;
@@ -192,7 +227,6 @@ void perform_swizzles(void) {
         if (statusCls) {
             swizzleMethod(statusCls, @selector(layoutLoginForm:centerX:centerY:isLandscape:), (IMP)dummy_imp);
             swizzleMethod(statusCls, @selector(layoutExpiredForm:centerX:centerY:isLandscape:), (IMP)dummy_imp);
-            // Quan trọng: hook validateKey:
             swizzleMethod(statusCls, NSSelectorFromString(@"validateKey:"), (IMP)fake_validateKey);
         }
 
@@ -201,6 +235,15 @@ void perform_swizzles(void) {
         if (cls) {
             swizzleMethod(cls, NSSelectorFromString(@"VKgetUdidFromKeyChain"), (IMP)fake_udid_imp);
             swizzleMethod(cls, NSSelectorFromString(@"VKsaveUdidToKeyChain:"), (IMP)dummy_save_udid);
+        }
+        
+        // Fake NetTool
+        Class netToolCls = objc_getClass("NetTool");
+        if (netToolCls) {
+            Method m1 = class_getClassMethod([NetToolFake class], NSSelectorFromString(@"Post_AppendURL:myparameters:mysuccess:myfailure:"));
+            if (m1) swizzleMethod(netToolCls, NSSelectorFromString(@"Post_AppendURL:myparameters:mysuccess:myfailure:"), method_getImplementation(m1));
+            Method m2 = class_getClassMethod([NetToolFake class], NSSelectorFromString(@"verifySignature:withData:usingPublicKeyString:"));
+            if (m2) swizzleMethod(netToolCls, NSSelectorFromString(@"verifySignature:withData:usingPublicKeyString:"), method_getImplementation(m2));
         }
 
         // Hook showMenu:
@@ -221,19 +264,8 @@ void perform_swizzles(void) {
 // ------------------------------------------------------------
 __attribute__((constructor))
 static void init() {
-    NSLog(@"[LQBypass] ⚡ Dylib v8.2 đã nạp!");
-
+    NSLog(@"[LQBypass] ⚡ Dylib v8.3 đã nạp!");
     perform_swizzles();
-
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            force_bootstrap_menu();
-        });
-    }];
 
     // Backup gesture
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),

@@ -1,6 +1,6 @@
 // =========================================================================
-//  LQBypass.m — Tweak Dylib Toàn Diện Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 8.1: Anti-Debug, Mock API-Client State & Bootstrap Hoàn Hảo
+//  LQBypass.m — Tweak Dylib Cho Liên Quân Mobile (AWSS3.framework)
+//  Phiên bản 8.1: Anti-Debug, Mock API-Client State & Bootstrap Menu Trực Tiếp
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -11,8 +11,9 @@
 #import <dlfcn.h>
 #import <sys/types.h>
 #import <sys/sysctl.h>
-
-static id g_imguiViewController = nil;
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import "fishhook.h"
 
 // -------------------------------------------------------------------------
 // 1. Helper: Tìm Image Base Slide của AWSS3.framework
@@ -49,7 +50,7 @@ uintptr_t get_awss3_base_slide(void) {
             return;
         }
 
-        // 1. Toggle hiển thị ImGui (Radar/ESP)
+        // Toggle ImGui (Radar/ESP)
         Class imguiCls = objc_getClass("ImGuiDrawView");
         if (imguiCls) {
             SEL setVisSel = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
@@ -62,14 +63,13 @@ uintptr_t get_awss3_base_slide(void) {
             }
         }
 
-        // 2. Mở bảng cài đặt Mod Menu chính (_UIOverlayPresentationController)
+        // Mở bảng Mod Menu (_UIOverlayPresentationController)
         Class menuVCCls = objc_getClass("_UIOverlayPresentationController");
         if (!menuVCCls) {
             NSLog(@"[LQBypass] ❌ Không tìm thấy class _UIOverlayPresentationController");
             return;
         }
 
-        // Nếu menu đang hiển thị -> đóng lại
         if ([rootVC.presentedViewController isKindOfClass:menuVCCls]) {
             [rootVC dismissViewControllerAnimated:YES completion:^{
                 NSLog(@"[LQBypass] 🔽 Đã đóng Bảng Menu Mod");
@@ -77,20 +77,19 @@ uintptr_t get_awss3_base_slide(void) {
             return;
         }
 
-        // Reset cờ guard chống mở lặp @ 0x36C0D00
+        // Reset guard @ 0x36C0D00
         uintptr_t slide = get_awss3_base_slide();
         if (slide) {
             uint8_t *guard_ptr = (uint8_t *)(slide + 0x36C0D00);
             *guard_ptr = 0;
         }
 
-        // Khởi tạo và bung Bảng Menu Mod
         UIViewController *menuVC = [[menuVCCls alloc] init];
         if (menuVC) {
             menuVC.modalPresentationStyle = UIModalPresentationOverFullScreen;
             menuVC.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
             [rootVC presentViewController:menuVC animated:YES completion:^{
-                NSLog(@"[LQBypass] 🚀 BẢNG MENU MOD ĐÃ BUNG LÊN MÀN HÌNH THÀNH CÔNG!");
+                NSLog(@"[LQBypass] 🚀 BẢNG MENU MOD ĐÃ BUNG LÊN!");
             }];
         }
     });
@@ -98,7 +97,7 @@ uintptr_t get_awss3_base_slide(void) {
 @end
 
 // -------------------------------------------------------------------------
-// 3. Fake NetTool Response (VIP Schema - AWSS3 v2)
+// 3. Fake NetTool Response (VIP Schema – tùy chọn, anh có thể giữ hoặc bỏ)
 // -------------------------------------------------------------------------
 @interface NetToolFake : NSObject
 + (id)Post_AppendURL:(id)url myparameters:(id)params mysuccess:(id)success myfailure:(id)failure;
@@ -123,9 +122,9 @@ uintptr_t get_awss3_base_slide(void) {
         };
         fakeResponse = @{
             @"code": @200,
-            @"status": @"success", // Phải khác account_not_activated
+            @"status": @"success",
             @"success": @YES,
-            @"unix": unixNum,      // Root unix cho time check
+            @"unix": unixNum,
             @"data": pkgData
         };
     } else if ([urlStr containsString:@"credential-v3"] || [urlStr containsString:@"key-v3"]) {
@@ -199,17 +198,10 @@ static void hook_show_menu_imp(id self, SEL _cmd, id gesture) {
 // -------------------------------------------------------------------------
 // 5. Anti-Debug Bypass (ptrace, sysctl, connect)
 // -------------------------------------------------------------------------
-#import <sys/socket.h>
-#import <netinet/in.h>
-
-#import "fishhook.h"
-
-// Original function pointers
 static int (*orig_ptrace)(int _request, pid_t _pid, caddr_t _addr, int _data);
 static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 static int (*orig_connect)(int socket, const struct sockaddr *address, socklen_t address_len);
 
-// Hook implementations
 int my_ptrace(int _request, pid_t _pid, caddr_t _addr, int _data) {
     if (_request == 31) { // PT_DENY_ATTACH
         NSLog(@"[LQBypass] 🛡️ Chặn ptrace(PT_DENY_ATTACH)");
@@ -225,7 +217,7 @@ int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
             struct kinfo_proc *info = (struct kinfo_proc *)oldp;
             if (info->kp_proc.p_flag & P_TRACED) {
                 NSLog(@"[LQBypass] 🛡️ Chặn sysctl dò P_TRACED");
-                info->kp_proc.p_flag &= ~P_TRACED; // Clear the traced flag
+                info->kp_proc.p_flag &= ~P_TRACED;
             }
         }
     }
@@ -237,14 +229,14 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
         struct sockaddr_in *sin = (struct sockaddr_in *)address;
         if (ntohs(sin->sin_port) == 27042) {
             NSLog(@"[LQBypass] 🛡️ Chặn connect tới port debug 27042");
-            return -1; // Connection refused
+            return -1;
         }
     }
     return orig_connect ? orig_connect(socket, address, address_len) : -1;
 }
 
 // -------------------------------------------------------------------------
-// 6. Direct Bootstrap (Bypass Network Flow)
+// 6. Direct Bootstrap – Gọi thẳng completion block 0x02F085B4
 // -------------------------------------------------------------------------
 void force_bootstrap_menu(void) {
     static dispatch_once_t onceToken;
@@ -257,10 +249,8 @@ void force_bootstrap_menu(void) {
             return;
         }
 
-        // Mock State API-Client
+        // Mock State: set token (seed)
         NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
-        
-        // Gọi _apiclient_set_token (0x00CB80A0)
         void (*set_token_func)(id) = (void (*)(id))(slide + 0x00CB80A0);
         @try {
             set_token_func(seed);
@@ -270,9 +260,7 @@ void force_bootstrap_menu(void) {
         }
 
         // Gọi Completion Block tạo Menu (0x02F085B4)
-        // Completion block nhận 2 tham số: response data và error
         void (*menu_bootstrap_block)(id, id) = (void (*)(id, id))(slide + 0x02F085B4);
-        
         NSDictionary *fakeResp = @{
             @"status": @"success",
             @"unix": @((long long)[[NSDate date] timeIntervalSince1970]),
@@ -288,7 +276,7 @@ void force_bootstrap_menu(void) {
             }
         };
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             @try {
                 menu_bootstrap_block(fakeResp, nil);
                 NSLog(@"[LQBypass] ✅ Đã gọi completion block (0x02F085B4) thành công!");
@@ -299,11 +287,13 @@ void force_bootstrap_menu(void) {
     });
 }
 
+// -------------------------------------------------------------------------
+// 7. Perform Swizzles
+// -------------------------------------------------------------------------
 void perform_swizzles(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        
-        // 1. Hook Anti-Debug using fishhook
+        // Hook Anti-Debug using fishhook
         struct rebinding rebindings[] = {
             {"ptrace", my_ptrace, (void **)&orig_ptrace},
             {"sysctl", my_sysctl, (void **)&orig_sysctl},
@@ -312,14 +302,14 @@ void perform_swizzles(void) {
         rebind_symbols(rebindings, 3);
         NSLog(@"[LQBypass] 🛡️ Anti-debug hooks applied");
 
-        // 2. Mute Login UI
+        // Mute Login UI
         Class statusCls = objc_getClass("ASStatusView");
         if (statusCls) {
             swizzleMethod(statusCls, NSSelectorFromString(@"layoutLoginForm:centerX:centerY:isLandscape:"), (IMP)dummy_imp);
             swizzleMethod(statusCls, NSSelectorFromString(@"layoutExpiredForm:centerX:centerY:isLandscape:"), (IMP)dummy_imp);
         }
 
-        // 3. Mock Keychain
+        // Mock Keychain UDID
         Class cls = objc_getClass("VKKeychainUDID");
         if (!cls) cls = objc_getClass("VKKeychainIDFV");
         if (cls) {
@@ -327,7 +317,7 @@ void perform_swizzles(void) {
             swizzleMethod(cls, NSSelectorFromString(@"VKsaveUdidToKeyChain:"), (IMP)dummy_save_udid);
         }
 
-        // 4. Fake NetTool
+        // Fake NetTool (giữ để backup)
         Class netToolCls = objc_getClass("NetTool");
         if (netToolCls) {
             Method m1 = class_getClassMethod([NetToolFake class], NSSelectorFromString(@"Post_AppendURL:myparameters:mysuccess:myfailure:"));
@@ -336,7 +326,7 @@ void perform_swizzles(void) {
             if (m2) swizzleMethod(netToolCls, NSSelectorFromString(@"verifySignature:withData:usingPublicKeyString:"), method_getImplementation(m2));
         }
 
-        // 5. Show Menu Hook
+        // Hook showMenu: để khi chạm nút nổi mở menu
         Class modCtrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (modCtrlCls) {
             swizzleMethod(modCtrlCls, NSSelectorFromString(@"showMenu:"), (IMP)hook_show_menu_imp);
@@ -348,7 +338,7 @@ void perform_swizzles(void) {
 }
 
 // -------------------------------------------------------------------------
-// 7. Constructor
+// 8. Constructor
 // -------------------------------------------------------------------------
 __attribute__((constructor))
 static void init() {
@@ -356,7 +346,7 @@ static void init() {
 
     perform_swizzles();
 
-    // Thay vì chờ Network Flow, chúng ta chủ động Inject State và gọi thẳng block tạo Menu
+    // Sau khi app launch, chủ động mock state và gọi completion block
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
@@ -367,6 +357,7 @@ static void init() {
         });
     }];
 
+    // Backup: cử chỉ 2 ngón chạm 2 lần
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;

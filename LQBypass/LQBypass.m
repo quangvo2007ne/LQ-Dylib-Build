@@ -1,8 +1,4 @@
-// =========================================================================
-//  LQBypass.m — Tweak Dylib Hook cho Liên Quân Mobile iOS Mod (AWSS3)
-//  Phiên bản 4.0: Cập nhật dựa trên báo cáo phân tích toàn diện Crypto & Network
-// =========================================================================
-
+// LQBypass_debug.m – Phiên bản có log file và pop-up trực tiếp trên màn hình
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -10,11 +6,44 @@
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 
-static id g_modControllerInstance = nil;
+// === Helper viết log vào file ===
+void writeLog(NSString *msg) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    NSString *logPath = [docDir stringByAppendingPathComponent:@"lq_bypass_log.txt"];
+    NSString *timestamp = [NSDate date].description;
+    NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, msg];
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (!fileHandle) {
+        [entry writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [fileHandle seekToEndOfFile];
+        [fileHandle writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+        [fileHandle closeFile];
+    }
+}
 
-// -------------------------------------------------------------------------
-// 1. Helper: Tìm Image Base Slide của AWSS3.framework
-// -------------------------------------------------------------------------
+// === Helper hiện pop-up ===
+void showAlert(NSString *title, NSString *msg) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
+        if (keyWin && keyWin.rootViewController) {
+            [keyWin.rootViewController presentViewController:alert animated:YES completion:nil];
+        } else {
+            NSArray *windows = [UIApplication sharedApplication].windows;
+            if (windows.count > 0) {
+                UIWindow *w = windows.firstObject;
+                if (w.rootViewController) {
+                    [w.rootViewController presentViewController:alert animated:YES completion:nil];
+                }
+            }
+        }
+    });
+}
+
+// === Get AWSS3 slide ===
 uintptr_t get_awss3_base_slide(void) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
@@ -26,9 +55,7 @@ uintptr_t get_awss3_base_slide(void) {
     return 0;
 }
 
-// -------------------------------------------------------------------------
-// 2. Class Helper: Quản lý Menu Mod và Dọn dẹp triệt để màn hình mờ/đen
-// -------------------------------------------------------------------------
+// === Helper class ===
 @interface LQBypassHelper : NSObject
 + (void)toggleImGuiMenu;
 + (void)dismissAllOverlays;
@@ -39,41 +66,29 @@ uintptr_t get_awss3_base_slide(void) {
 
 + (void)dismissAllOverlays {
     dispatch_async(dispatch_get_main_queue(), ^{
+        writeLog(@"dismissAllOverlays called");
         NSArray *windows = [UIApplication sharedApplication].windows;
         for (UIWindow *w in windows) {
             NSString *winCls = NSStringFromClass([w class]);
-            
-            // Vô hiệu hóa toàn bộ cửa sổ phụ hiển thị auth / UDID
             if ([winCls containsString:@"APIClientOverlay"] ||
                 [winCls containsString:@"OverlayWindow"] ||
                 [winCls containsString:@"Status"]) {
                 w.hidden = YES;
                 w.alpha = 0.0;
                 [w setRootViewController:nil];
-                [w removeFromSuperview];
             }
-            
-            // Dọn dẹp toàn bộ view làm mờ (dimming / blur / HUD)
             for (UIView *subview in [w.subviews copy]) {
                 NSString *cls = NSStringFromClass([subview class]);
-                
-                // Giữ nguyên ImGuiDrawView và Floating Buttons của Mod
-                if ([cls containsString:@"ImGui"] || 
-                    [cls containsString:@"Toggle"] || 
-                    [cls containsString:@"Button"]) {
+                if ([cls containsString:@"ImGui"] || [cls containsString:@"Toggle"] || [cls containsString:@"Button"]) {
                     continue;
                 }
-                
-                // Xóa sổ toàn bộ view che màn hình
                 if ([cls containsString:@"HUD"] ||
                     [cls containsString:@"Status"] ||
                     [cls containsString:@"Alert"] ||
                     [cls containsString:@"HideView"] ||
                     [cls containsString:@"Loading"] ||
                     [cls containsString:@"Progress"] ||
-                    [cls containsString:@"Indicator"] ||
-                    [cls containsString:@"VisualEffect"]) {
-                    NSLog(@"[LQBypass] 🧹 Đã xoá view che màn hình: %@", cls);
+                    [cls containsString:@"Indicator"]) {
                     subview.hidden = YES;
                     [subview removeFromSuperview];
                 }
@@ -85,35 +100,65 @@ uintptr_t get_awss3_base_slide(void) {
 + (void)bootstrapModMenu {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSLog(@"[LQBypass] 🚀 Bắt đầu khởi tạo Menu Mod...");
-        
+        writeLog(@"bootstrapModMenu started");
+        showAlert(@"LQBypass", @"Đang khởi tạo menu...");
+
+        // In ra danh sách class để tìm tên đúng
+        int numClasses = objc_getClassList(NULL, 0);
+        if (numClasses > 0) {
+            Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+            numClasses = objc_getClassList(classes, numClasses);
+            NSMutableArray *classNames = [NSMutableArray array];
+            for (int i = 0; i < numClasses; i++) {
+                const char *name = class_getName(classes[i]);
+                if (name) {
+                    NSString *nsName = [NSString stringWithUTF8String:name];
+                    if ([nsName containsString:@"ImGui"] || [nsName containsString:@"DrawView"] || [nsName containsString:@"Toggle"]) {
+                        [classNames addObject:nsName];
+                    }
+                }
+            }
+            free(classes);
+            writeLog([NSString stringWithFormat:@"Tìm thấy class liên quan: %@", classNames]);
+            showAlert(@"Class liên quan", [classNames componentsJoinedByString:@", "]);
+        }
+
+        // Thử tìm class bằng tên gốc
         Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (!cls) {
-            NSLog(@"[LQBypass] ❌ Không tìm thấy class tXGBBDJNKKzPYcSGmlav");
+            writeLog(@"❌ Không tìm thấy class tXGBBDJNKKzPYcSGmlav");
+            showAlert(@"Lỗi", @"Không tìm thấy class mod! Kiểm tra danh sách class.");
             return;
         }
-        
-        g_modControllerInstance = [[cls alloc] init];
-        NSLog(@"[LQBypass] ✅ Đã tạo instance tXGBBDJNKKzPYcSGmlav: %@", g_modControllerInstance);
 
-        // Lưu vào BSS cache của AWSS3 @ 0x36BDFD0
+        id instance = [[cls alloc] init];
+        if (!instance) {
+            writeLog(@"❌ Không thể alloc instance");
+            showAlert(@"Lỗi", @"Không alloc được instance");
+            return;
+        }
+
+        // Lưu vào BSS cache
         uintptr_t slide = get_awss3_base_slide();
-        if (slide > 0) {
+        if (slide) {
             uintptr_t *cache = (uintptr_t *)(slide + 0x36BDFD0);
-            *cache = (uintptr_t)g_modControllerInstance;
-            NSLog(@"[LQBypass] ✅ Đã lưu vào BSS cache @ %p", cache);
+            *cache = (uintptr_t)instance;
+            writeLog(@"✅ Đã ghi vào BSS cache");
         }
 
-        // Kích hoạt cử chỉ và vẽ nút tròn nổi lên màn hình
-        if ([g_modControllerInstance respondsToSelector:@selector(initTapGes)]) {
-            [g_modControllerInstance performSelector:@selector(initTapGes)];
-            NSLog(@"[LQBypass] ✅ Đã gọi [initTapGes] thành công!");
-        } else if ([g_modControllerInstance respondsToSelector:@selector(setupFloatingToggleButtons)]) {
-            [g_modControllerInstance performSelector:@selector(setupFloatingToggleButtons)];
-            NSLog(@"[LQBypass] ✅ Đã gọi [setupFloatingToggleButtons] thành công!");
+        if ([instance respondsToSelector:@selector(initTapGes)]) {
+            [instance performSelector:@selector(initTapGes)];
+            writeLog(@"✅ initTapGes called");
+            showAlert(@"Success", @"initTapGes đã gọi!");
+        } else if ([instance respondsToSelector:@selector(setupFloatingToggleButtons)]) {
+            [instance performSelector:@selector(setupFloatingToggleButtons)];
+            writeLog(@"✅ setupFloatingToggleButtons called");
+            showAlert(@"Success", @"setupFloatingToggleButtons đã gọi!");
+        } else {
+            writeLog(@"❌ Không tìm thấy selector initTapGes hay setupFloatingToggleButtons");
+            showAlert(@"Lỗi", @"Không tìm thấy selector khởi tạo");
         }
-        
-        // Dọn dẹp overlay sau khi tạo nút
+
         [LQBypassHelper dismissAllOverlays];
     });
 }
@@ -121,25 +166,19 @@ uintptr_t get_awss3_base_slide(void) {
 + (void)toggleImGuiMenu {
     Class imguiCls = objc_getClass("ImGuiDrawView");
     if (!imguiCls) return;
-    
     SEL getSel = NSSelectorFromString(@"GmmtbwBOlBYaQRpBHDVm");
     SEL setSel = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
     if (![imguiCls respondsToSelector:getSel] || ![imguiCls respondsToSelector:setSel]) return;
-    
     BOOL (*getVis)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
     void (*setVis)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
-    
     BOOL current = getVis(imguiCls, getSel);
     setVis(imguiCls, setSel, !current);
-    NSLog(@"[LQBypass] 🔄 Toggle Menu ImGui: %d -> %d", current, !current);
+    writeLog([NSString stringWithFormat:@"Toggle ImGui: %d -> %d", current, !current]);
 }
-
 @end
 
-// -------------------------------------------------------------------------
-// 3. Dummy IMPs & Custom Implementations
-// -------------------------------------------------------------------------
-static void dummy_imp(id self, SEL _cmd, ...) {}
+// === Các IMP giả ===
+static void dummy_imp(id self, SEL _cmd, ...) { writeLog(@"dummy_imp called"); }
 
 static id dummy_init_hidden(id self, SEL _cmd, CGRect frame) {
     struct objc_super sup = {
@@ -154,52 +193,55 @@ static id dummy_init_hidden(id self, SEL _cmd, CGRect frame) {
     return v;
 }
 
-static id fake_udid_imp(id self, SEL _cmd) {
-    return @"00000000-0000-0000-0000-000000000000";
-}
+static id fake_udid_imp(id self, SEL _cmd) { return @"00000000-0000-0000-0000-000000000000"; }
+static void dummy_save_udid(id self, SEL _cmd, id udid) {}
 
-// Intercept Post_AppendURL:myparameters:mysuccess:myfailure:
-// Thay vì treo máy chờ mạng, ta kích hoạt hoàn tất ngay và khởi tạo menu
-static void fake_post_append_url(id self, SEL _cmd, id url, id params, void (^mysuccess)(id), void (^myfailure)(id)) {
-    NSLog(@"[LQBypass] 🌐 Chặn request POST tới: %@", url);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [LQBypassHelper bootstrapModMenu];
-        [LQBypassHelper dismissAllOverlays];
-    });
-}
-
-// -------------------------------------------------------------------------
-// 4. Cài đặt toàn bộ Swizzle theo tài liệu phân tích
-// -------------------------------------------------------------------------
+// === Swizzles ===
 void perform_swizzles(void) {
-    // 4a. Hook NetTool Post_AppendURL (Tránh treo mạng State Machine)
+    writeLog(@"perform_swizzles started");
+    // 1. Block network
     Class netTool = objc_getClass("NetTool");
     if (netTool) {
         SEL postSel = NSSelectorFromString(@"Post_AppendURL:myparameters:mysuccess:myfailure:");
         Method m = class_getClassMethod(netTool, postSel);
+        if (m) { method_setImplementation(m, (IMP)dummy_imp); writeLog(@"✅ NetTool post swizzled"); }
+    }
+
+    // 2. Bypass decrypt – gọi bootstrap
+    Class fwEnc = objc_getClass("FWEncryptorAES");
+    if (fwEnc) {
+        SEL decSel = NSSelectorFromString(@"decrypt:Key:IV:");
+        Method m = class_getClassMethod(fwEnc, decSel);
         if (m) {
-            method_setImplementation(m, (IMP)fake_post_append_url);
-            NSLog(@"[LQBypass] ✅ Đã hook NetTool Post_AppendURL");
+            IMP newImp = imp_implementationWithBlock(^id(id self, NSData *cipher, NSData *key, NSData *iv) {
+                writeLog(@"🔥 decrypt called – forcing bootstrap");
+                showAlert(@"decrypt", @"Đã chặn decrypt, gọi menu...");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [LQBypassHelper bootstrapModMenu];
+                });
+                return [NSData data];
+            });
+            method_setImplementation(m, newImp);
+            writeLog(@"✅ FWEncryptorAES decrypt swizzled");
         }
     }
 
-    // 4b. Hook Cửa sổ Overlay hiển thị Device UDID ID Mode
+    // 3. Overlay windows
     Class overlayWin = objc_getClass("APIClientOverlayWindow");
     if (overlayWin) {
         Method m1 = class_getInstanceMethod(overlayWin, NSSelectorFromString(@"makeKeyAndVisible"));
-        if (m1) method_setImplementation(m1, (IMP)dummy_imp);
-        
+        if (m1) { method_setImplementation(m1, (IMP)dummy_imp); }
         Method m2 = class_getInstanceMethod(overlayWin, NSSelectorFromString(@"initWithFrame:"));
-        if (m2) method_setImplementation(m2, (IMP)dummy_init_hidden);
-        
+        if (m2) { method_setImplementation(m2, (IMP)dummy_init_hidden); }
         Method m3 = class_getInstanceMethod(overlayWin, NSSelectorFromString(@"updateFrame"));
-        if (m3) method_setImplementation(m3, (IMP)dummy_imp);
+        if (m3) { method_setImplementation(m3, (IMP)dummy_imp); }
+        writeLog(@"✅ OverlayWindow swizzled");
     }
 
-    // 4c. Hook toàn bộ các điểm gọi Dialog của ASStatusView
+    // 4. ASStatusView
     Class statusView = objc_getClass("ASStatusView");
     if (statusView) {
-        NSArray *selectorsToMute = @[
+        NSArray *selectors = @[
             @"showLoginForm",
             @"showLoginFormWithTitle:description:placeholder:submitTitle:contactTitle:countdownFrom:",
             @"showExpiredForm",
@@ -215,27 +257,27 @@ void perform_swizzles(void) {
             @"showErrorWithTitle:message:buttonTitle:",
             @"showSuccessWithTitle:message:buttonTitle:"
         ];
-        for (NSString *selName in selectorsToMute) {
+        for (NSString *selName in selectors) {
             SEL sel = NSSelectorFromString(selName);
             Method m = class_getInstanceMethod(statusView, sel);
             if (m) method_setImplementation(m, (IMP)dummy_imp);
         }
+        writeLog(@"✅ ASStatusView swizzled");
     }
 
-    // 4d. Hook ASHideView & ASStatusUDIDAlertView
+    // 5. Hide views
     Class hideView = objc_getClass("ASHideView");
     if (hideView) {
         Method m = class_getInstanceMethod(hideView, NSSelectorFromString(@"initWithFrame:"));
         if (m) method_setImplementation(m, (IMP)dummy_init_hidden);
     }
-    
     Class udidAlert = objc_getClass("ASStatusUDIDAlertView");
     if (udidAlert) {
         Method m = class_getInstanceMethod(udidAlert, NSSelectorFromString(@"configureWithTitle:message:leftTitle:rightTitle:"));
         if (m) method_setImplementation(m, (IMP)dummy_imp);
     }
 
-    // 4e. Mute JGProgressHUD & MBProgressHUD
+    // 6. HUDs
     Class jgHud = objc_getClass("JGProgressHUD");
     if (jgHud) {
         for (NSString *selName in @[@"showInView:", @"showInView:animated:", @"showInView:animated:afterDelay:"]) {
@@ -243,7 +285,6 @@ void perform_swizzles(void) {
             if (m) method_setImplementation(m, (IMP)dummy_imp);
         }
     }
-    
     Class mbHud = objc_getClass("MBProgressHUD");
     if (mbHud) {
         for (NSString *selName in @[@"showAnimated:", @"showUsingAnimation:"]) {
@@ -252,62 +293,54 @@ void perform_swizzles(void) {
         }
     }
 
-    // 4f. Hook Keychain UDID
-    Class keychain = objc_getClass("VKKeychainIDFV");
-    if (!keychain) keychain = objc_getClass("VKKeychainUDID");
+    // 7. UDID keychain
+    Class keychain = objc_getClass("VKKeychainUDID");
+    if (!keychain) keychain = objc_getClass("VKKeychainIDFV");
     if (keychain) {
         SEL getSel = sel_registerName("VKgetUdidFromKeyChain");
         Method gm = class_getClassMethod(keychain, getSel);
         if (!gm) gm = class_getInstanceMethod(keychain, getSel);
         if (gm) method_setImplementation(gm, (IMP)fake_udid_imp);
 
-        SEL mainUdidSel = sel_registerName("VKKeychainUDID");
-        Method um = class_getClassMethod(keychain, mainUdidSel);
-        if (!um) um = class_getInstanceMethod(keychain, mainUdidSel);
-        if (um) method_setImplementation(um, (IMP)fake_udid_imp);
+        SEL saveSel = sel_registerName("VKsaveUdidToKeyChain:");
+        Method sm = class_getClassMethod(keychain, saveSel);
+        if (!sm) sm = class_getInstanceMethod(keychain, saveSel);
+        if (sm) method_setImplementation(sm, (IMP)dummy_save_udid);
+        writeLog(@"✅ Keychain swizzled");
     }
+
+    writeLog(@"perform_swizzles completed");
 }
 
-// -------------------------------------------------------------------------
-// 5. Entry point (Constructor nạp dylib)
-// -------------------------------------------------------------------------
+// === Entry point ===
 __attribute__((constructor))
 static void lq_bypass_init(void) {
-    NSLog(@"[LQBypass] ⚡ Dylib v4.0 đã nạp thành công!");
+    writeLog(@"LQBypass dylib loaded (constructor)");
+    showAlert(@"LQBypass", @"Dylib đã load! Đang chờ...");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         perform_swizzles();
     });
 
-    // Lắng nghe khi app khởi động xong
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
-        NSLog(@"[LQBypass] 📱 App hoàn tất khởi chạy!");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        writeLog(@"UIApplicationDidFinishLaunchingNotification received");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [LQBypassHelper bootstrapModMenu];
             [LQBypassHelper dismissAllOverlays];
         });
     }];
 
-    // Fallback kích hoạt sau 2.5 giây
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        writeLog(@"Fallback 3s trigger");
         [LQBypassHelper bootstrapModMenu];
         [LQBypassHelper dismissAllOverlays];
     });
 
-    // Quét liên tục dọn sạch màn hình mờ trong 8 giây đầu
-    for (float delay = 0.5; delay <= 8.0; delay += 0.5) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [LQBypassHelper dismissAllOverlays];
-        });
-    }
-
-    // Cử chỉ dự phòng: 2 ngón tay chạm 2 lần để bật/tắt Menu ImGui
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
@@ -321,6 +354,7 @@ static void lq_bypass_init(void) {
             tap.numberOfTouchesRequired = 2;
             tap.numberOfTapsRequired = 2;
             [keyWindow addGestureRecognizer:tap];
+            writeLog(@"Double-tap gesture added");
         }
     });
 }

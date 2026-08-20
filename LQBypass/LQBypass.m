@@ -1,6 +1,6 @@
 // =========================================================================
 //  LQBypass.m — Tweak Dylib Toàn Diện Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 6.1: Gắn ImGui MTKView Chắc Chắn & Tự Động Load Settings
+//  Phiên bản 7.0: Mở Khóa Trực Tiếp Bảng Điều Khiển _UIOverlayPresentationController
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -11,7 +11,6 @@
 #import <dlfcn.h>
 
 static id g_modControllerInstance = nil;
-static id g_imguiViewController = nil;
 
 // -------------------------------------------------------------------------
 // 1. Helper: Tìm Image Base Slide của AWSS3.framework
@@ -28,91 +27,95 @@ uintptr_t get_awss3_base_slide(void) {
 }
 
 // -------------------------------------------------------------------------
-// 2. Class Helper: Quản lý Menu Mod ImGui & Gắn View
+// 2. Class Helper: Quản lý Bật/Tắt Menu Mod & Dọn Dẹp
 // -------------------------------------------------------------------------
 @interface LQBypassHelper : NSObject
-+ (void)toggleImGuiMenu;
-+ (void)forceCleanAllOverlays;
++ (void)openModMenu;
 + (void)dismissAllHUDsAndWindows;
 + (void)cleanSubviewsOfView:(UIView *)view;
-+ (void)attachImGuiToWindow;
 @end
 
 @implementation LQBypassHelper
 
-+ (void)attachImGuiToWindow {
++ (void)openModMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
         if (!keyWin && [UIApplication sharedApplication].windows.count > 0) {
             keyWin = [UIApplication sharedApplication].windows.firstObject;
         }
-        if (!keyWin) {
-            NSLog(@"[LQBypass] ⚠️ keyWindow nil, sẽ thử lại sau");
+        UIViewController *rootVC = keyWin.rootViewController;
+        if (!rootVC) {
+            NSLog(@"[LQBypass] ⚠️ Không tìm thấy rootViewController");
             return;
         }
 
+        // 1. Toggle hiển thị ImGui (Radar/ESP)
         Class imguiCls = objc_getClass("ImGuiDrawView");
-        if (!imguiCls) {
-            NSLog(@"[LQBypass] ❌ Không tìm thấy class ImGuiDrawView");
+        if (imguiCls) {
+            SEL setVisSel = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
+            SEL getVisSel = NSSelectorFromString(@"GmmtbwBOlBYaQRpBHDVm");
+            if ([imguiCls respondsToSelector:getVisSel] && [imguiCls respondsToSelector:setVisSel]) {
+                BOOL (*getVis)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+                void (*setVis)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
+                BOOL cur = getVis(imguiCls, getVisSel);
+                setVis(imguiCls, setVisSel, !cur);
+            }
+        }
+
+        // 2. Mở bảng cài đặt Mod Menu chính (_UIOverlayPresentationController)
+        Class menuVCCls = objc_getClass("_UIOverlayPresentationController");
+        if (!menuVCCls) {
+            NSLog(@"[LQBypass] ❌ Không tìm thấy class _UIOverlayPresentationController");
             return;
         }
 
-        // Prepare assets nếu có
-        if ([imguiCls respondsToSelector:NSSelectorFromString(@"aovcheatPrepareIfNeeded")]) {
-            [imguiCls performSelector:NSSelectorFromString(@"aovcheatPrepareIfNeeded")];
+        // Nếu menu đang hiển thị -> đóng lại
+        if ([rootVC.presentedViewController isKindOfClass:menuVCCls]) {
+            [rootVC dismissViewControllerAnimated:YES completion:^{
+                NSLog(@"[LQBypass] 🔽 Đã đóng Bảng Menu Mod");
+            }];
+            return;
         }
 
-        if (!g_imguiViewController) {
-            if ([imguiCls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) {
-                g_imguiViewController = [imguiCls performSelector:NSSelectorFromString(@"sharedInstance")];
-            }
-            if (!g_imguiViewController) {
-                g_imguiViewController = [[imguiCls alloc] init];
-            }
-            // Load settings của menu nếu có
-            if ([g_imguiViewController respondsToSelector:NSSelectorFromString(@"loadSettings")]) {
-                [g_imguiViewController performSelector:NSSelectorFromString(@"loadSettings")];
-            }
+        // Reset cờ guard chống mở lặp @ 0x36C0D00
+        uintptr_t slide = get_awss3_base_slide();
+        if (slide) {
+            uint8_t *guard_ptr = (uint8_t *)(slide + 0x36C0D00);
+            *guard_ptr = 0;
         }
 
-        if (!g_imguiViewController) return;
-
-        UIView *imguiView = [g_imguiViewController performSelector:@selector(view)];
-        if (!imguiView) return;
-
-        if (![imguiView isDescendantOfView:keyWin]) {
-            imguiView.frame = keyWin.bounds;
-            imguiView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            imguiView.backgroundColor = [UIColor clearColor];
-            imguiView.userInteractionEnabled = YES;
-            
-            // Nếu có rootViewController, add làm child view controller để nhận event chuẩn
-            if (keyWin.rootViewController && [g_imguiViewController isKindOfClass:[UIViewController class]]) {
-                [keyWin.rootViewController addChildViewController:g_imguiViewController];
-                [keyWin addSubview:imguiView];
-                [g_imguiViewController didMoveToParentViewController:keyWin.rootViewController];
-            } else {
-                [keyWin addSubview:imguiView];
-            }
-            NSLog(@"[LQBypass] ✅ Đã gắn MTKView của ImGui vào keyWindow thành công!");
+        // Khởi tạo và bung Bảng Menu Mod
+        UIViewController *menuVC = [[menuVCCls alloc] init];
+        if (menuVC) {
+            menuVC.modalPresentationStyle = UIModalPresentationOverFullScreen;
+            menuVC.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+            [rootVC presentViewController:menuVC animated:YES completion:^{
+                NSLog(@"[LQBypass] 🚀 BẢNG MENU MOD ĐÃ BUNG LÊN MÀN HÌNH THÀNH CÔNG!");
+            }];
         }
-        [keyWin bringSubviewToFront:imguiView];
     });
 }
 
 + (void)cleanSubviewsOfView:(UIView *)view {
     for (UIView *v in [view.subviews copy]) {
         NSString *cls = NSStringFromClass([v class]);
-        // Giữ lại MTKView ImGui và các nút tròn nổi
-        if ([cls containsString:@"ImGui"] || [cls containsString:@"MTKView"] || 
-            [cls containsString:@"Toggle"] || [cls containsString:@"Button"]) {
+        
+        // TUYỆT ĐỐI GIỮ LẠI: Menu Mod (_UIOverlayPresentationController), ImGui, Nút Nổi
+        if ([cls containsString:@"_UIOverlayPresentationController"] ||
+            [cls containsString:@"ImGui"] || 
+            [cls containsString:@"MTKView"] || 
+            [cls containsString:@"Toggle"] || 
+            [cls containsString:@"Button"]) {
             continue;
         }
-        // Loại bỏ mọi view che chắn, làm mờ, alert, loading
-        if ([cls containsString:@"HUD"] || [cls containsString:@"Status"] ||
-            [cls containsString:@"Alert"] || [cls containsString:@"Loading"] ||
-            [cls containsString:@"Progress"] || [cls containsString:@"Indicator"] ||
-            [cls containsString:@"HideView"] || [cls containsString:@"VisualEffect"]) {
+        
+        // Chỉ xóa đúng các view chặn màn hình
+        if ([cls containsString:@"APIClientOverlay"] ||
+            [cls containsString:@"ASStatusUDIDAlertView"] ||
+            [cls containsString:@"ASHideView"] ||
+            [cls containsString:@"JGProgressHUD"] ||
+            [cls containsString:@"MBProgressHUD"] ||
+            [cls containsString:@"ASProgressHUD"]) {
             v.hidden = YES;
             [v removeFromSuperview];
         } else {
@@ -126,8 +129,7 @@ uintptr_t get_awss3_base_slide(void) {
         NSArray *windows = [UIApplication sharedApplication].windows;
         for (UIWindow *w in windows) {
             NSString *cls = NSStringFromClass([w class]);
-            if ([cls containsString:@"Overlay"] || [cls containsString:@"Status"] ||
-                [cls containsString:@"HUD"] || [cls containsString:@"Alert"]) {
+            if ([cls containsString:@"APIClientOverlayWindow"]) {
                 w.hidden = YES;
                 w.alpha = 0.0;
                 [w setRootViewController:nil];
@@ -138,44 +140,6 @@ uintptr_t get_awss3_base_slide(void) {
     });
 }
 
-+ (void)forceCleanAllOverlays {
-    for (int i = 0; i < 15; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [self dismissAllHUDsAndWindows];
-        });
-    }
-}
-
-+ (void)toggleImGuiMenu {
-    Class imguiCls = objc_getClass("ImGuiDrawView");
-    if (!imguiCls) return;
-
-    SEL getVisSel = NSSelectorFromString(@"GmmtbwBOlBYaQRpBHDVm");
-    SEL setVisSel = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
-    if (![imguiCls respondsToSelector:getVisSel] || ![imguiCls respondsToSelector:setVisSel]) return;
-
-    BOOL (*getVis)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
-    void (*setVis)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
-
-    BOOL current = getVis(imguiCls, getVisSel);
-    BOOL newState = !current;
-    setVis(imguiCls, setVisSel, newState);
-    NSLog(@"[LQBypass] 🔄 Toggle ImGui Menu: %d -> %d", current, newState);
-
-    // Gắn và đưa MTKView lên trên cùng
-    [self attachImGuiToWindow];
-
-    if (g_imguiViewController) {
-        UIView *v = [g_imguiViewController performSelector:@selector(view)];
-        if (v) {
-            v.hidden = NO;
-            if (v.window) {
-                [v.window bringSubviewToFront:v];
-            }
-        }
-    }
-}
 @end
 
 // -------------------------------------------------------------------------
@@ -285,10 +249,10 @@ static id fake_udid_imp(id self, SEL _cmd) {
 static void dummy_save_udid(id self, SEL _cmd, id udid) {}
 static void dummy_showHUD(id self, SEL _cmd, ...) {}
 
-// Hook trực tiếp showMenu: khi chạm vào Nút Nổi
+// Hook trực tiếp khi chạm vào Nút Nổi -> Bật ngay Bảng Menu Mod!
 static void hook_show_menu_imp(id self, SEL _cmd, id gesture) {
-    NSLog(@"[LQBypass] 🔘 Đã chạm vào Nút Nổi -> Bật/Tắt Menu Mod ImGui!");
-    [LQBypassHelper toggleImGuiMenu];
+    NSLog(@"[LQBypass] 🔘 Đã chạm vào Nút Nổi -> Kích hoạt mở Bảng Menu Mod!");
+    [LQBypassHelper openModMenu];
 }
 
 void perform_swizzles(void) {
@@ -379,7 +343,7 @@ void perform_swizzles(void) {
         Class modCtrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (modCtrlCls) {
             swizzleMethod(modCtrlCls, NSSelectorFromString(@"showMenu:"), (IMP)hook_show_menu_imp);
-            NSLog(@"[LQBypass] ✅ Đã hook showMenu: trực tiếp");
+            NSLog(@"[LQBypass] ✅ Đã gắn hook showMenu: -> openModMenu");
         }
 
         NSLog(@"[LQBypass] ✅ Swizzles hoàn tất!");
@@ -393,9 +357,6 @@ void bootstrap_mod_menu(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[LQBypass] 🚀 Bắt đầu khởi tạo Menu Mod...");
-
-        // Gắn MTKView ImGui
-        [LQBypassHelper attachImGuiToWindow];
 
         // Khởi tạo Controller nút nổi
         Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
@@ -424,8 +385,6 @@ void bootstrap_mod_menu(void) {
             NSLog(@"[LQBypass] ✅ Đã gọi [setupFloatingToggleButtons]");
         }
 
-        // Dọn dẹp overlay
-        [LQBypassHelper forceCleanAllOverlays];
         [LQBypassHelper dismissAllHUDsAndWindows];
     });
 }
@@ -435,7 +394,7 @@ void bootstrap_mod_menu(void) {
 // -------------------------------------------------------------------------
 __attribute__((constructor))
 static void init() {
-    NSLog(@"[LQBypass] ⚡ Dylib v6.1 đã nạp thành công!");
+    NSLog(@"[LQBypass] ⚡ Dylib v7.0 đã nạp thành công!");
 
     perform_swizzles();
 
@@ -454,7 +413,7 @@ static void init() {
         bootstrap_mod_menu();
     });
 
-    // Cử chỉ chạm 2 ngón 2 lần để toggle Menu ImGui
+    // Cử chỉ chạm 2 ngón 2 lần để mở Bảng Menu Mod
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
@@ -463,7 +422,7 @@ static void init() {
         if (keyWin) {
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
                                            initWithTarget:[LQBypassHelper class]
-                                           action:@selector(toggleImGuiMenu)];
+                                           action:@selector(openModMenu)];
             tap.numberOfTouchesRequired = 2;
             tap.numberOfTapsRequired = 2;
             [keyWin addGestureRecognizer:tap];

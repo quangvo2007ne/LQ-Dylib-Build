@@ -13,14 +13,38 @@
 static id g_modControllerInstance = nil;
 
 // -------------------------------------------------------------------------
-// 1. Khai báo Class Helper trước để tránh lỗi undeclared identifier
+// 1. Helper dọn dẹp toàn bộ HUD / Loading / Alert chặn màn hình
 // -------------------------------------------------------------------------
 @interface LQBypassHelper : NSObject
 + (void)toggleImGuiMenu;
 + (void)bootstrapModMenu;
++ (void)dismissAllHUDs;
 @end
 
 @implementation LQBypassHelper
+
++ (void)dismissAllHUDs {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray *windows = [UIApplication sharedApplication].windows;
+        for (UIWindow *window in windows) {
+            for (UIView *subview in [window.subviews copy]) {
+                NSString *className = NSStringFromClass([subview class]);
+                // Không ẩn ImGuiDrawView và Floating Buttons
+                if ([className containsString:@"ImGui"] || [className containsString:@"Toggle"] || [className containsString:@"Button"]) {
+                    continue;
+                }
+                if ([className containsString:@"HUD"] || 
+                    [className containsString:@"Status"] || 
+                    [className containsString:@"Alert"] || 
+                    [className containsString:@"Loading"]) {
+                    NSLog(@"[LQBypass] Đã xoá HUD chặn màn hình: %@", className);
+                    subview.hidden = YES;
+                    [subview removeFromSuperview];
+                }
+            }
+        }
+    });
+}
 
 + (void)toggleImGuiMenu {
     Class imguiCls = objc_getClass("ImGuiDrawView");
@@ -107,35 +131,48 @@ static id g_modControllerInstance = nil;
 @end
 
 // -------------------------------------------------------------------------
-// 2. Hook vô hiệu hoá Dialog Key & UDID (ASStatusView)
+// 2. Hook vô hiệu hoá Dialog Key & UDID & HUDs
 // -------------------------------------------------------------------------
-static void hook_status_view(void) {
+static void mute_method(Class cls, const char *selName) {
+    if (!cls) return;
+    SEL sel = sel_registerName(selName);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) m = class_getClassMethod(cls, sel);
+    if (m) {
+        IMP dummyImp = imp_implementationWithBlock(^(id self, ...){
+            NSLog(@"[LQBypass] Chặn gọi hàm: %s", selName);
+            return nil;
+        });
+        method_setImplementation(m, dummyImp);
+    }
+}
+
+static void hook_all_blockers(void) {
+    // 1. ASStatusView
     Class statusViewCls = objc_getClass("ASStatusView");
-    if (!statusViewCls) return;
+    if (statusViewCls) {
+        const char *sels[] = {
+            "showLoginForm", "showLoginFormWithTitle:description:placeholder:submitTitle:contactTitle:countdownFrom:",
+            "showExpiredForm", "showExpiredWithTitle:message:changeKeyTitle:copyUDIDTitle:copyKeyTitle:countdownFrom:",
+            "showLoginError:", "showLoginLoading",
+            "showUDIDAlertWithTitle:message:leftTitle:rightTitle:leftAction:rightAction:",
+            "layoutLoginForm:centerX:centerY:isLandscape:", "layoutExpiredForm:centerX:centerY:isLandscape:"
+        };
+        for (int i = 0; i < sizeof(sels)/sizeof(sels[0]); i++) mute_method(statusViewCls, sels[i]);
+    }
     
-    id dummyBlock = ^(id self, ...) {
-        NSLog(@"[LQBypass] Chặn thành công Popup Key / UDID!");
-    };
-    IMP dummyImp = imp_implementationWithBlock(dummyBlock);
+    // 2. JGProgressHUD & MBProgressHUD (Chặn spinner đứng màn hình)
+    Class jgHudCls = objc_getClass("JGProgressHUD");
+    if (jgHudCls) {
+        mute_method(jgHudCls, "showInView:");
+        mute_method(jgHudCls, "showInView:animated:");
+        mute_method(jgHudCls, "showInView:animated:afterDelay:");
+    }
     
-    const char *selectors_to_mute[] = {
-        "showLoginForm",
-        "showLoginFormWithTitle:description:placeholder:submitTitle:contactTitle:countdownFrom:",
-        "showExpiredForm",
-        "showExpiredWithTitle:message:changeKeyTitle:copyUDIDTitle:copyKeyTitle:countdownFrom:",
-        "showLoginError:",
-        "showLoginLoading",
-        "showUDIDAlertWithTitle:message:leftTitle:rightTitle:leftAction:rightAction:",
-        "layoutLoginForm:centerX:centerY:isLandscape:",
-        "layoutExpiredForm:centerX:centerY:isLandscape:"
-    };
-    
-    for (int i = 0; i < sizeof(selectors_to_mute)/sizeof(selectors_to_mute[0]); i++) {
-        SEL sel = sel_registerName(selectors_to_mute[i]);
-        Method m = class_getInstanceMethod(statusViewCls, sel);
-        if (m) {
-            method_setImplementation(m, dummyImp);
-        }
+    Class mbHudCls = objc_getClass("MBProgressHUD");
+    if (mbHudCls) {
+        mute_method(mbHudCls, "showAnimated:");
+        mute_method(mbHudCls, "showUsingAnimation:");
     }
 }
 
@@ -146,24 +183,30 @@ __attribute__((constructor))
 static void lq_bypass_init(void) {
     NSLog(@"[LQBypass] Tweak dylib đã được nạp thành công vào tiến trình!");
     
-    // 1. Hook chặn dialog key ngay lập tức
     dispatch_async(dispatch_get_main_queue(), ^{
-        hook_status_view();
+        hook_all_blockers();
     });
     
-    // 2. Lắng nghe sự kiện App đã khởi động xong UI -> Khởi tạo Menu Mod
+    // Đăng ký khởi tạo Menu Mod
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         NSLog(@"[LQBypass] Nhận thông báo UIApplicationDidFinishLaunchingNotification!");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [LQBypassHelper bootstrapModMenu];
         });
     }];
     
-    // 3. Dự phòng nếu notification đã trôi qua
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Dự phòng khởi tạo sau 2 giây
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [LQBypassHelper bootstrapModMenu];
     });
+    
+    // Lặp quét dọn dẹp HUD sau 1s, 2s, 3s, 5s để đảm bảo màn hình sạch 100%
+    for (float delay = 0.5; delay <= 5.0; delay += 0.5) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [LQBypassHelper dismissAllHUDs];
+        });
+    }
 }

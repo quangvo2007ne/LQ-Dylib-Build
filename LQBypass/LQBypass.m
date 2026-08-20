@@ -277,12 +277,8 @@ void force_bootstrap_menu(void) {
         };
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            @try {
-                menu_bootstrap_block(fakeResp, nil);
-                NSLog(@"[LQBypass] ✅ Đã gọi completion block (0x02F085B4) thành công!");
-            } @catch (NSException *e) {
-                NSLog(@"[LQBypass] ❌ Exception khi gọi block: %@", e);
-            }
+            menu_bootstrap_block(fakeResp, nil);
+            NSLog(@"[LQBypass] ✅ Gọi completion block");
         });
     });
 }

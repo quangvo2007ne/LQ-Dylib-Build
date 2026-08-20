@@ -1,4 +1,4 @@
-// LQBypass_debug.m – Phiên bản có log file và pop-up trực tiếp trên màn hình
+// LQBypass_debug_final.m
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -101,65 +101,51 @@ uintptr_t get_awss3_base_slide(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         writeLog(@"bootstrapModMenu started");
-        showAlert(@"LQBypass", @"Đang khởi tạo menu...");
+        showAlert(@"LQBypass", @"Đang tìm class mod...");
 
-        // In ra danh sách class để tìm tên đúng
-        int numClasses = objc_getClassList(NULL, 0);
-        if (numClasses > 0) {
-            Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-            numClasses = objc_getClassList(classes, numClasses);
-            NSMutableArray *classNames = [NSMutableArray array];
-            for (int i = 0; i < numClasses; i++) {
-                const char *name = class_getName(classes[i]);
-                if (name) {
-                    NSString *nsName = [NSString stringWithUTF8String:name];
-                    if ([nsName containsString:@"ImGui"] || [nsName containsString:@"DrawView"] || [nsName containsString:@"Toggle"]) {
-                        [classNames addObject:nsName];
+        // 1. Tìm class "tXGBBDJNKKzPYcSGmlav"
+        Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
+        if (cls) {
+            writeLog(@"✅ Tìm thấy class tXGBBDJNKKzPYcSGmlav");
+            showAlert(@"Thành công", @"Tìm thấy class mod!");
+        } else {
+            writeLog(@"❌ Không tìm thấy class tXGBBDJNKKzPYcSGmlav");
+            showAlert(@"Thất bại", @"Không tìm thấy class mod! Đang tìm class khác...");
+        }
+
+        // 2. Nếu không tìm thấy, tự động quét tất cả class để tìm
+        if (!cls) {
+            int numClasses = objc_getClassList(NULL, 0);
+            if (numClasses > 0) {
+                Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+                numClasses = objc_getClassList(classes, numClasses);
+                NSMutableArray *foundClasses = [NSMutableArray array];
+                for (int i = 0; i < numClasses; i++) {
+                    const char *name = class_getName(classes[i]);
+                    if (name) {
+                        NSString *nsName = [NSString stringWithUTF8String:name];
+                        // Tìm class có chứa từ khóa "ImGui", "Draw", "Toggle" hoặc bắt đầu bằng "tX"
+                        if ([nsName containsString:@"ImGui"] ||
+                            [nsName containsString:@"DrawView"] ||
+                            [nsName containsString:@"Toggle"] ||
+                            [nsName hasPrefix:@"tX"]) {
+                            [foundClasses addObject:nsName];
+                            writeLog([NSString stringWithFormat:@"Tìm thấy class tiềm năng: %@", nsName]);
+                        }
                     }
                 }
+                free(classes);
+                
+                if (foundClasses.count > 0) {
+                    NSString *msg = [foundClasses componentsJoinedByString:@"\n"];
+                    writeLog([NSString stringWithFormat:@"Danh sách class tìm thấy:\n%@", msg]);
+                    showAlert(@"Class tìm thấy", msg);
+                } else {
+                    writeLog(@"❌ Không tìm thấy class nào có từ khóa.");
+                    showAlert(@"Lỗi", @"Không tìm thấy class mod nào!");
+                }
             }
-            free(classes);
-            writeLog([NSString stringWithFormat:@"Tìm thấy class liên quan: %@", classNames]);
-            showAlert(@"Class liên quan", [classNames componentsJoinedByString:@", "]);
         }
-
-        // Thử tìm class bằng tên gốc
-        Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
-        if (!cls) {
-            writeLog(@"❌ Không tìm thấy class tXGBBDJNKKzPYcSGmlav");
-            showAlert(@"Lỗi", @"Không tìm thấy class mod! Kiểm tra danh sách class.");
-            return;
-        }
-
-        id instance = [[cls alloc] init];
-        if (!instance) {
-            writeLog(@"❌ Không thể alloc instance");
-            showAlert(@"Lỗi", @"Không alloc được instance");
-            return;
-        }
-
-        // Lưu vào BSS cache
-        uintptr_t slide = get_awss3_base_slide();
-        if (slide) {
-            uintptr_t *cache = (uintptr_t *)(slide + 0x36BDFD0);
-            *cache = (uintptr_t)instance;
-            writeLog(@"✅ Đã ghi vào BSS cache");
-        }
-
-        if ([instance respondsToSelector:@selector(initTapGes)]) {
-            [instance performSelector:@selector(initTapGes)];
-            writeLog(@"✅ initTapGes called");
-            showAlert(@"Success", @"initTapGes đã gọi!");
-        } else if ([instance respondsToSelector:@selector(setupFloatingToggleButtons)]) {
-            [instance performSelector:@selector(setupFloatingToggleButtons)];
-            writeLog(@"✅ setupFloatingToggleButtons called");
-            showAlert(@"Success", @"setupFloatingToggleButtons đã gọi!");
-        } else {
-            writeLog(@"❌ Không tìm thấy selector initTapGes hay setupFloatingToggleButtons");
-            showAlert(@"Lỗi", @"Không tìm thấy selector khởi tạo");
-        }
-
-        [LQBypassHelper dismissAllOverlays];
     });
 }
 
@@ -327,6 +313,7 @@ static void lq_bypass_init(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         writeLog(@"UIApplicationDidFinishLaunchingNotification received");
+        showAlert(@"App Launch", @"Đã nhận notification launch!");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [LQBypassHelper bootstrapModMenu];
@@ -339,22 +326,5 @@ static void lq_bypass_init(void) {
         writeLog(@"Fallback 3s trigger");
         [LQBypassHelper bootstrapModMenu];
         [LQBypassHelper dismissAllOverlays];
-    });
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-        if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) {
-            keyWindow = [UIApplication sharedApplication].windows.firstObject;
-        }
-        if (keyWindow) {
-            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-                                            initWithTarget:[LQBypassHelper class]
-                                            action:@selector(toggleImGuiMenu)];
-            tap.numberOfTouchesRequired = 2;
-            tap.numberOfTapsRequired = 2;
-            [keyWindow addGestureRecognizer:tap];
-            writeLog(@"Double-tap gesture added");
-        }
     });
 }

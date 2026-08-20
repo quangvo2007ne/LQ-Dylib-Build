@@ -1,0 +1,25 @@
+name: Build iOS Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile LQBypass.dylib
+        run: |
+          cd LQBypass
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload Dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LQBypass-Dylib
+          path: LQBypass/LQBypass.dylib

@@ -1,6 +1,6 @@
 // =========================================================================
 //  LQBypass.m — Tweak Dylib Toàn Diện Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 6.0: Kích Hoạt & Gắn Trực Tiếp MTKView của ImGuiDrawView Lên Màn Hình
+//  Phiên bản 6.1: Gắn ImGui MTKView Chắc Chắn & Tự Động Load Settings
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -28,7 +28,7 @@ uintptr_t get_awss3_base_slide(void) {
 }
 
 // -------------------------------------------------------------------------
-// 2. Class Helper: Quản lý Menu Mod ImGui & Dọn dẹp
+// 2. Class Helper: Quản lý Menu Mod ImGui & Gắn View
 // -------------------------------------------------------------------------
 @interface LQBypassHelper : NSObject
 + (void)toggleImGuiMenu;
@@ -42,15 +42,26 @@ uintptr_t get_awss3_base_slide(void) {
 
 + (void)attachImGuiToWindow {
     dispatch_async(dispatch_get_main_queue(), ^{
-        Class imguiCls = objc_getClass("ImGuiDrawView");
-        if (!imguiCls) return;
+        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
+        if (!keyWin && [UIApplication sharedApplication].windows.count > 0) {
+            keyWin = [UIApplication sharedApplication].windows.firstObject;
+        }
+        if (!keyWin) {
+            NSLog(@"[LQBypass] ⚠️ keyWindow nil, sẽ thử lại sau");
+            return;
+        }
 
-        // 1. Chuẩn bị file tài nguyên cheat nếu cần
+        Class imguiCls = objc_getClass("ImGuiDrawView");
+        if (!imguiCls) {
+            NSLog(@"[LQBypass] ❌ Không tìm thấy class ImGuiDrawView");
+            return;
+        }
+
+        // Prepare assets nếu có
         if ([imguiCls respondsToSelector:NSSelectorFromString(@"aovcheatPrepareIfNeeded")]) {
             [imguiCls performSelector:NSSelectorFromString(@"aovcheatPrepareIfNeeded")];
         }
 
-        // 2. Lấy hoặc tạo instance ImGuiDrawView (UIViewController)
         if (!g_imguiViewController) {
             if ([imguiCls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) {
                 g_imguiViewController = [imguiCls performSelector:NSSelectorFromString(@"sharedInstance")];
@@ -58,28 +69,34 @@ uintptr_t get_awss3_base_slide(void) {
             if (!g_imguiViewController) {
                 g_imguiViewController = [[imguiCls alloc] init];
             }
-        }
-
-        // 3. Gắn MTKView của ImGui vào UIWindow chính
-        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
-        if (!keyWin && [UIApplication sharedApplication].windows.count > 0) {
-            keyWin = [UIApplication sharedApplication].windows.firstObject;
-        }
-
-        if (keyWin && g_imguiViewController) {
-            UIView *imguiView = [g_imguiViewController performSelector:@selector(view)];
-            if (imguiView) {
-                if (![imguiView isDescendantOfView:keyWin]) {
-                    imguiView.frame = keyWin.bounds;
-                    imguiView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                    imguiView.backgroundColor = [UIColor clearColor];
-                    imguiView.userInteractionEnabled = YES;
-                    [keyWin addSubview:imguiView];
-                    NSLog(@"[LQBypass] ✅ Đã gắn MTKView của ImGuiDrawView vào UIWindow thành công!");
-                }
-                [keyWin bringSubviewToFront:imguiView];
+            // Load settings của menu nếu có
+            if ([g_imguiViewController respondsToSelector:NSSelectorFromString(@"loadSettings")]) {
+                [g_imguiViewController performSelector:NSSelectorFromString(@"loadSettings")];
             }
         }
+
+        if (!g_imguiViewController) return;
+
+        UIView *imguiView = [g_imguiViewController performSelector:@selector(view)];
+        if (!imguiView) return;
+
+        if (![imguiView isDescendantOfView:keyWin]) {
+            imguiView.frame = keyWin.bounds;
+            imguiView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            imguiView.backgroundColor = [UIColor clearColor];
+            imguiView.userInteractionEnabled = YES;
+            
+            // Nếu có rootViewController, add làm child view controller để nhận event chuẩn
+            if (keyWin.rootViewController && [g_imguiViewController isKindOfClass:[UIViewController class]]) {
+                [keyWin.rootViewController addChildViewController:g_imguiViewController];
+                [keyWin addSubview:imguiView];
+                [g_imguiViewController didMoveToParentViewController:keyWin.rootViewController];
+            } else {
+                [keyWin addSubview:imguiView];
+            }
+            NSLog(@"[LQBypass] ✅ Đã gắn MTKView của ImGui vào keyWindow thành công!");
+        }
+        [keyWin bringSubviewToFront:imguiView];
     });
 }
 
@@ -146,8 +163,18 @@ uintptr_t get_awss3_base_slide(void) {
     setVis(imguiCls, setVisSel, newState);
     NSLog(@"[LQBypass] 🔄 Toggle ImGui Menu: %d -> %d", current, newState);
 
-    // Đảm bảo MTKView luôn được gắn và đưa lên trên cùng
+    // Gắn và đưa MTKView lên trên cùng
     [self attachImGuiToWindow];
+
+    if (g_imguiViewController) {
+        UIView *v = [g_imguiViewController performSelector:@selector(view)];
+        if (v) {
+            v.hidden = NO;
+            if (v.window) {
+                [v.window bringSubviewToFront:v];
+            }
+        }
+    }
 }
 @end
 
@@ -258,7 +285,7 @@ static id fake_udid_imp(id self, SEL _cmd) {
 static void dummy_save_udid(id self, SEL _cmd, id udid) {}
 static void dummy_showHUD(id self, SEL _cmd, ...) {}
 
-// Hook trực tiếp showMenu: của nút tròn nổi để chắc chắn mở được bảng ImGui
+// Hook trực tiếp showMenu: khi chạm vào Nút Nổi
 static void hook_show_menu_imp(id self, SEL _cmd, id gesture) {
     NSLog(@"[LQBypass] 🔘 Đã chạm vào Nút Nổi -> Bật/Tắt Menu Mod ImGui!");
     [LQBypassHelper toggleImGuiMenu];
@@ -348,11 +375,11 @@ void perform_swizzles(void) {
             if (m2) swizzleMethod(netToolCls, NSSelectorFromString(@"verifySignature:withData:usingPublicKeyString:"), method_getImplementation(m2));
         }
 
-        // --- 5h. Hook showMenu: trên controller nút nổi để kích hoạt ImGui ngay lập tức ---
+        // --- 5h. Hook showMenu: trên controller nút nổi ---
         Class modCtrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (modCtrlCls) {
             swizzleMethod(modCtrlCls, NSSelectorFromString(@"showMenu:"), (IMP)hook_show_menu_imp);
-            NSLog(@"[LQBypass] ✅ Đã hook showMenu: trực tiếp vào ImGui");
+            NSLog(@"[LQBypass] ✅ Đã hook showMenu: trực tiếp");
         }
 
         NSLog(@"[LQBypass] ✅ Swizzles hoàn tất!");
@@ -367,10 +394,10 @@ void bootstrap_mod_menu(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[LQBypass] 🚀 Bắt đầu khởi tạo Menu Mod...");
 
-        // 6a. Khởi tạo và gắn MTKView của ImGuiDrawView lên màn hình
+        // Gắn MTKView ImGui
         [LQBypassHelper attachImGuiToWindow];
 
-        // 6b. Khởi tạo Controller nút nổi
+        // Khởi tạo Controller nút nổi
         Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (!cls) {
             NSLog(@"[LQBypass] ❌ Không tìm thấy class tXGBBDJNKKzPYcSGmlav");
@@ -408,7 +435,7 @@ void bootstrap_mod_menu(void) {
 // -------------------------------------------------------------------------
 __attribute__((constructor))
 static void init() {
-    NSLog(@"[LQBypass] ⚡ Dylib v6.0 (ImGui Attached) đã nạp thành công!");
+    NSLog(@"[LQBypass] ⚡ Dylib v6.1 đã nạp thành công!");
 
     perform_swizzles();
 
@@ -427,7 +454,7 @@ static void init() {
         bootstrap_mod_menu();
     });
 
-    // Cử chỉ chạm 2 ngón 2 lần để bật/tắt Menu ImGui trực tiếp
+    // Cử chỉ chạm 2 ngón 2 lần để toggle Menu ImGui
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;

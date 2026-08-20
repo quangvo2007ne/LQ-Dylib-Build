@@ -1,6 +1,6 @@
 // =========================================================================
 //  LQBypass.m — Tweak Dylib Toàn Diện Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 8.0: Thuận Theo Luồng Auth Tự Nhiên & Fix JSON Schema
+//  Phiên bản 8.1: Anti-Debug, Mock API-Client State & Bootstrap Hoàn Hảo
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -9,6 +9,8 @@
 #import <objc/message.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
+#import <sys/types.h>
+#import <sys/sysctl.h>
 
 static id g_imguiViewController = nil;
 
@@ -96,7 +98,7 @@ uintptr_t get_awss3_base_slide(void) {
 @end
 
 // -------------------------------------------------------------------------
-// 3. Fake NetTool Response (VIP Schema)
+// 3. Fake NetTool Response (VIP Schema - AWSS3 v2)
 // -------------------------------------------------------------------------
 @interface NetToolFake : NSObject
 + (id)Post_AppendURL:(id)url myparameters:(id)params mysuccess:(id)success myfailure:(id)failure;
@@ -114,7 +116,6 @@ uintptr_t get_awss3_base_slide(void) {
     NSNumber *unixNum = @((long long)currentUnix);
 
     if ([urlStr containsString:@"package-v3"]) {
-        // Response cho package-v3: status và unix nằm ở ROOT
         NSDictionary *pkgData = @{
             @"packageName": @"com.garena.game.kgvn",
             @"name": @"LienQuanMobile",
@@ -122,13 +123,12 @@ uintptr_t get_awss3_base_slide(void) {
         };
         fakeResponse = @{
             @"code": @200,
-            @"status": @"success", // Không phải account_not_activated
+            @"status": @"success", // Phải khác account_not_activated
             @"success": @YES,
-            @"unix": unixNum,      // <-- Root unix để qua time check
+            @"unix": unixNum,      // Root unix cho time check
             @"data": pkgData
         };
     } else if ([urlStr containsString:@"credential-v3"] || [urlStr containsString:@"key-v3"]) {
-        // Response cho credential/key
         NSDictionary *authData = @{
             @"key": @"VIP-LIFETIME-2099",
             @"status": @"active",
@@ -191,23 +191,135 @@ static id fake_udid_imp(id self, SEL _cmd) {
 
 static void dummy_save_udid(id self, SEL _cmd, id udid) {}
 
-// Hook trực tiếp khi chạm vào Nút Nổi -> Bật ngay Bảng Menu Mod!
 static void hook_show_menu_imp(id self, SEL _cmd, id gesture) {
     NSLog(@"[LQBypass] 🔘 Đã chạm vào Nút Nổi -> Kích hoạt mở Bảng Menu Mod!");
     [LQBypassHelper openModMenu];
 }
 
+// -------------------------------------------------------------------------
+// 5. Anti-Debug Bypass (ptrace, sysctl, connect)
+// -------------------------------------------------------------------------
+#import <sys/socket.h>
+#import <netinet/in.h>
+
+#import "fishhook.h"
+
+// Original function pointers
+static int (*orig_ptrace)(int _request, pid_t _pid, caddr_t _addr, int _data);
+static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+static int (*orig_connect)(int socket, const struct sockaddr *address, socklen_t address_len);
+
+// Hook implementations
+int my_ptrace(int _request, pid_t _pid, caddr_t _addr, int _data) {
+    if (_request == 31) { // PT_DENY_ATTACH
+        NSLog(@"[LQBypass] 🛡️ Chặn ptrace(PT_DENY_ATTACH)");
+        return 0;
+    }
+    return orig_ptrace ? orig_ptrace(_request, _pid, _addr, _data) : -1;
+}
+
+int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+    if (ret == 0 && namelen == 4 && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
+        if (oldp) {
+            struct kinfo_proc *info = (struct kinfo_proc *)oldp;
+            if (info->kp_proc.p_flag & P_TRACED) {
+                NSLog(@"[LQBypass] 🛡️ Chặn sysctl dò P_TRACED");
+                info->kp_proc.p_flag &= ~P_TRACED; // Clear the traced flag
+            }
+        }
+    }
+    return ret;
+}
+
+int my_connect(int socket, const struct sockaddr *address, socklen_t address_len) {
+    if (address->sa_family == AF_INET) {
+        struct sockaddr_in *sin = (struct sockaddr_in *)address;
+        if (ntohs(sin->sin_port) == 27042) {
+            NSLog(@"[LQBypass] 🛡️ Chặn connect tới port debug 27042");
+            return -1; // Connection refused
+        }
+    }
+    return orig_connect ? orig_connect(socket, address, address_len) : -1;
+}
+
+// -------------------------------------------------------------------------
+// 6. Direct Bootstrap (Bypass Network Flow)
+// -------------------------------------------------------------------------
+void force_bootstrap_menu(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSLog(@"[LQBypass] 🚀 Đang mock API-Client state và Bootstrap Menu trực tiếp...");
+
+        uintptr_t slide = get_awss3_base_slide();
+        if (!slide) {
+            NSLog(@"[LQBypass] ❌ Lỗi: Không tìm thấy slide của AWSS3");
+            return;
+        }
+
+        // Mock State API-Client
+        NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
+        
+        // Gọi _apiclient_set_token (0x00CB80A0)
+        void (*set_token_func)(id) = (void (*)(id))(slide + 0x00CB80A0);
+        @try {
+            set_token_func(seed);
+            NSLog(@"[LQBypass] ✅ Đã set mock token (seed)");
+        } @catch (NSException *e) {
+            NSLog(@"[LQBypass] ⚠️ Lỗi set token: %@", e);
+        }
+
+        // Gọi Completion Block tạo Menu (0x02F085B4)
+        // Completion block nhận 2 tham số: response data và error
+        void (*menu_bootstrap_block)(id, id) = (void (*)(id, id))(slide + 0x02F085B4);
+        
+        NSDictionary *fakeResp = @{
+            @"status": @"success",
+            @"unix": @((long long)[[NSDate date] timeIntervalSince1970]),
+            @"code": @200,
+            @"success": @YES,
+            @"data": @{
+                @"key": @"VIP-LIFETIME-2099",
+                @"status": @"active",
+                @"package": @"AOV",
+                @"license": @"VIP",
+                @"expiredAt": @"2099-12-31 23:59:59",
+                @"id": @"88888888"
+            }
+        };
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                menu_bootstrap_block(fakeResp, nil);
+                NSLog(@"[LQBypass] ✅ Đã gọi completion block (0x02F085B4) thành công!");
+            } @catch (NSException *e) {
+                NSLog(@"[LQBypass] ❌ Exception khi gọi block: %@", e);
+            }
+        });
+    });
+}
+
 void perform_swizzles(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // Xóa Key Form trực tiếp để thỏa mãn Rule nếu lỡ hiện
+        
+        // 1. Hook Anti-Debug using fishhook
+        struct rebinding rebindings[] = {
+            {"ptrace", my_ptrace, (void **)&orig_ptrace},
+            {"sysctl", my_sysctl, (void **)&orig_sysctl},
+            {"connect", my_connect, (void **)&orig_connect},
+        };
+        rebind_symbols(rebindings, 3);
+        NSLog(@"[LQBypass] 🛡️ Anti-debug hooks applied");
+
+        // 2. Mute Login UI
         Class statusCls = objc_getClass("ASStatusView");
         if (statusCls) {
             swizzleMethod(statusCls, NSSelectorFromString(@"layoutLoginForm:centerX:centerY:isLandscape:"), (IMP)dummy_imp);
             swizzleMethod(statusCls, NSSelectorFromString(@"layoutExpiredForm:centerX:centerY:isLandscape:"), (IMP)dummy_imp);
         }
 
-        // Hook Keychain UDID
+        // 3. Mock Keychain
         Class cls = objc_getClass("VKKeychainUDID");
         if (!cls) cls = objc_getClass("VKKeychainIDFV");
         if (cls) {
@@ -215,7 +327,7 @@ void perform_swizzles(void) {
             swizzleMethod(cls, NSSelectorFromString(@"VKsaveUdidToKeyChain:"), (IMP)dummy_save_udid);
         }
 
-        // Hook NetTool Fake
+        // 4. Fake NetTool
         Class netToolCls = objc_getClass("NetTool");
         if (netToolCls) {
             Method m1 = class_getClassMethod([NetToolFake class], NSSelectorFromString(@"Post_AppendURL:myparameters:mysuccess:myfailure:"));
@@ -224,7 +336,7 @@ void perform_swizzles(void) {
             if (m2) swizzleMethod(netToolCls, NSSelectorFromString(@"verifySignature:withData:usingPublicKeyString:"), method_getImplementation(m2));
         }
 
-        // Hook showMenu: trên controller nút nổi để gắn tính năng 2-in-1
+        // 5. Show Menu Hook
         Class modCtrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (modCtrlCls) {
             swizzleMethod(modCtrlCls, NSSelectorFromString(@"showMenu:"), (IMP)hook_show_menu_imp);
@@ -236,20 +348,25 @@ void perform_swizzles(void) {
 }
 
 // -------------------------------------------------------------------------
-// 5. Constructor
+// 7. Constructor
 // -------------------------------------------------------------------------
 __attribute__((constructor))
 static void init() {
-    NSLog(@"[LQBypass] ⚡ Dylib v8.0 đã nạp thành công!");
-
-    // KHÔNG TỰ ĐỘNG GỌI bootstrap_mod_menu NỮA!
-    // Trả lại luồng tự nhiên cho Game. Game sẽ tự động gọi Completion Block 
-    // tại 0x02F085B4 sau khi Fake Network Auth thành công, 
-    // và Block đó sẽ tự động cấu hình integrity + Menu Mod chuẩn xác 100%!
+    NSLog(@"[LQBypass] ⚡ Dylib v8.1 đã nạp thành công!");
 
     perform_swizzles();
 
-    // Vẫn thêm cử chỉ chạm 2 ngón 2 lần để backup bật Bảng Menu Mod
+    // Thay vì chờ Network Flow, chúng ta chủ động Inject State và gọi thẳng block tạo Menu
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            force_bootstrap_menu();
+        });
+    }];
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;

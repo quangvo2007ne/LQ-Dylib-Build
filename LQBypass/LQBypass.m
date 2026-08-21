@@ -179,18 +179,32 @@ static void spawn_menu(void) {
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
 
-        // Bước 1: set seed
+        // Bước 1: set seed (_apiclient_set_token)
         NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
         void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
         @try { set_token(seed); lq_log(@"✅ set_token done"); }
         @catch (NSException *e) { lq_log(@"❌ set_token ex: %@", e.reason); }
 
-        // Bước 2: one-time init
+        // Bước 2: _apiclient_get_key → sub_D94DB8 → sub_2F544A0 (integrity state)
+        // Thiếu bước này thì showMenu: sẽ check auth fail → không mở ImGui
+        id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
+        id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
+        void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
+        @try {
+            id key   = get_key();
+            id state = get_state();
+            lq_log(@"✅ get_key=%@ get_state=%@", key, state);
+            set_state(seed, key, state);
+            lq_log(@"✅ sub_2F544A0 integrity state set");
+        }
+        @catch (NSException *e) { lq_log(@"❌ integrity ex: %@", e.reason); }
+
+        // Bước 3: one-time init
         void (*one_time_init)(void) = (void (*)(void))(slide + 0x02F54644);
         @try { one_time_init(); lq_log(@"✅ sub_2F54644 done"); }
         @catch (NSException *e) { lq_log(@"❌ sub_2F54644 ex: %@", e.reason); }
 
-        // Bước 3: initTapGes
+        // Bước 4: initTapGes — tạo floating button + ImGuiDrawView
         Class ctrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (!ctrlCls) { lq_log(@"❌ class not found"); return; }
         lq_log(@"✅ class found: %@", NSStringFromClass(ctrlCls));
@@ -202,14 +216,37 @@ static void spawn_menu(void) {
         if ([global_ctrl respondsToSelector:sel]) {
             @try {
                 ((void (*)(id, SEL))objc_msgSend)(global_ctrl, sel);
-                lq_log(@"✅ initTapGes done — nút nổi sẽ xuất hiện!");
+                lq_log(@"✅ initTapGes done — nút nổi xuất hiện!");
             }
             @catch (NSException *e) { lq_log(@"❌ initTapGes ex: %@", e.reason); }
         } else {
             lq_log(@"❌ initTapGes không respond");
         }
+
+        // Bước 5: Bypass showMenu: auth check → force ImGui visible trực tiếp
+        // showMenu: gọi nội bộ check integrity state trước khi mở ImGui
+        // Gọi FWBwynoreHMvFPjuQkTf: trực tiếp để skip check đó
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            Class imguiCls = objc_getClass("ImGuiDrawView");
+            if (imguiCls) {
+                SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
+                if ([imguiCls respondsToSelector:setVis]) {
+                    @try {
+                        ((void (*)(id, SEL, BOOL))objc_msgSend)(imguiCls, setVis, YES);
+                        lq_log(@"✅ ImGui force visible! Menu ESP đang mở...");
+                    }
+                    @catch (NSException *e) { lq_log(@"❌ ImGui force ex: %@", e.reason); }
+                } else {
+                    lq_log(@"❌ ImGuiDrawView không có FWBwynoreHMvFPjuQkTf:");
+                }
+            } else {
+                lq_log(@"❌ ImGuiDrawView class không tìm thấy");
+            }
+        });
     });
 }
+
 
 // Retry spawn — bấm nút "▶ Gọi Menu Lại" sau khi vào game
 // Phải đặt SAU spawn_menu để compiler thấy khai báo

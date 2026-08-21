@@ -49,9 +49,6 @@ static void lq_log(NSString *fmt, ...) {
     });
 }
 
-// =========================================================
-// HELPER CLASS — target cho UIButton (target:nil không hoạt động)
-// =========================================================
 @interface LQHelper : NSObject
 + (instancetype)shared;
 - (void)didTapHide;
@@ -71,6 +68,15 @@ static void lq_log(NSString *fmt, ...) {
     extern void lq_retry_spawn(void);
     lq_retry_spawn();
 }
+@end
+
+// =========================================================
+// MOCK GESTURE — Dùng để đánh lừa hàm showMenu:
+// =========================================================
+@interface LQMockGesture : NSObject
+@property (nonatomic, assign) NSInteger state;
+@end
+@implementation LQMockGesture
 @end
 
 static void setup_log_window(void) {
@@ -194,10 +200,10 @@ static void spawn_menu(void) {
         lq_log(@"✅ Đã lưu controller vào global 0x036BDFD0!");
 
         // BƯỚC 3: Dựng giao diện Nút nổi
-        SEL sel = NSSelectorFromString(@"initTapGes");
-        if ([global_ctrl respondsToSelector:sel]) {
+        SEL selInit = NSSelectorFromString(@"initTapGes");
+        if ([global_ctrl respondsToSelector:selInit]) {
             @try {
-                ((void (*)(id, SEL))objc_msgSend)(global_ctrl, sel);
+                ((void (*)(id, SEL))objc_msgSend)(global_ctrl, selInit);
                 lq_log(@"✅ initTapGes done — nút nổi xuất hiện!");
             }
             @catch (NSException *e) { lq_log(@"❌ initTapGes ex: %@", e.reason); }
@@ -205,14 +211,34 @@ static void spawn_menu(void) {
             lq_log(@"❌ initTapGes không respond");
         }
 
-        // BƯỚC 4: Force ImGui visible trực tiếp bằng cờ Memory
+        // BƯỚC 4: Đồng bộ màu nút (luồng chuẩn game gọi)
+        SEL selSetup = NSSelectorFromString(@"setupFloatingToggleButtons");
+        if ([global_ctrl respondsToSelector:selSetup]) {
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(global_ctrl, selSetup);
+                lq_log(@"✅ setupFloatingToggleButtons done!");
+            }
+            @catch (NSException *e) { lq_log(@"❌ setupFloating ex: %@", e.reason); }
+        }
+
+        // BƯỚC 5: Force ImGui visible bằng cách gọi thẳng showMenu: với Cử chỉ giả
+        // Thay vì ghi RAM trực tiếp làm lệch state inverse_visibility (0x036C2480),
+        // Ta gọi showMenu: để game tự render full luồng an toàn.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             @try {
-                *(uint8_t *)(slide + 0x36BD068) = 1;
-                lq_log(@"✅ Ép cờ g_menu_is_visible = 1 thành công!");
+                LQMockGesture *mock = [[LQMockGesture alloc] init];
+                mock.state = 3; // UIGestureRecognizerStateEnded = 3
+                
+                SEL showSel = NSSelectorFromString(@"showMenu:");
+                if ([global_ctrl respondsToSelector:showSel]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(global_ctrl, showSel, mock);
+                    lq_log(@"✅ Đã ép bung Menu bằng MockGesture thành công!");
+                } else {
+                    lq_log(@"❌ Không tìm thấy showMenu:");
+                }
             } @catch (NSException *e) {
-                lq_log(@"❌ Lỗi ghi cờ: %@", e.reason);
+                lq_log(@"❌ Lỗi gọi showMenu: %@", e.reason);
             }
         });
     });

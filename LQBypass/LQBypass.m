@@ -9,6 +9,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
+#import <sys/mman.h>
 #include "fishhook.h"
 
 // =========================================================
@@ -30,6 +31,38 @@ static void install_stealth_hooks(void) {
         {"_dyld_get_image_name", (void *)hook_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
     };
     rebind_symbols(hooks, 1);
+}
+
+// =========================================================
+// PATCH RUNTIME — tắt vòng reset visible trong drawInMTKView:
+// =========================================================
+// drawInMTKView: gọi validator rồi reset visible=0 mỗi frame nếu validator fail:
+//   0x02EE83B8  BL   sub_2F545C4
+//   0x02EE83BC  TBNZ W0,#0,0x02EE83C8   ; nếu valid→skip
+//   0x02EE83C0  ADRP X8, 0x036BD000
+//   0x02EE83C4  STRB WZR, [X8,#0x68]   ; visible = 0  ← 600+ lần/phiên!
+// Fix: thay TBNZ bằng B unconditional → luôn skip reset
+//   0x02EE83BC  B 0x02EE83C8  = 0x14000003
+static BOOL patch_draw_reset(uintptr_t slide) {
+    uintptr_t patch_va  = slide + 0x02EE83BC;  // địa chỉ runtime
+    uint32_t  instr     = 0x14000003;          // B +12 byte (bản le)
+    uintptr_t page_addr = patch_va & ~0xFFFUL; // căn chỉnh trang 4 KB
+
+    // Mở quyền ghi
+    if (mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        lq_log(@"\u274c patch_draw_reset: mprotect RWX fail (errno=%d)", errno);
+        return NO;
+    }
+
+    // Ghi 4 byte
+    *(uint32_t *)patch_va = instr;
+    __builtin___clear_cache((char *)patch_va, (char *)(patch_va + 4));
+
+    // Trả về RX
+    mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_EXEC);
+
+    lq_log(@"\u2705 patch_draw_reset: đã ghi B @ 0x02EE83BC → visible sẽ không bị reset mỗi frame!");
+    return YES;
 }
 
 // =========================================================
@@ -322,7 +355,10 @@ static void spawn_menu(void) {
             @catch (NSException *e) { lq_log(@"❌ setupFloating ex: %@", e.reason); }
         }
 
-        // BƯỚC 6: Force ImGui visible sau 2s (triple: class method + g_menu_is_visible + inverse flag)
+        // BƯỚC 6: Patch runtime — ngăn drawInMTKView: reset visible về 0 mỗi frame
+        patch_draw_reset(slide);
+
+        // BƯỚC 7: Force ImGui visible sau 2s (sau khi patch đã có hiệu lực)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             force_imgui_visible(slide);

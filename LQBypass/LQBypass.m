@@ -185,22 +185,18 @@ static void spawn_menu(void) {
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
 
-        // BƯỚC 1: Bật các "Công Tắc Phụ" (Integrity State)
-        // Nếu thiếu bước này, hàm showMenu: sẽ thấy thiếu dữ liệu và từ chối mở Menu!
-        // Lưu ý: Tuyệt đối KHÔNG gọi hàm Watchdog (0x02F54644) vì nó sẽ gây văng game.
-        NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
+        // BƯỚC 1: Ghi thẳng vào RAM để "đánh lừa" Validator (sub_2F545C4)
+        // Validator kiểm tra:
+        //   [a] tamper_byte @ 0x036C0208 == 0  (không bị phát hiện hack)
+        //   [b] hash_a @ 0x036C01F8 == hash_b @ 0x036C0200 (hash khớp)
+        // → Không gọi hàm nào (tránh crash do arg nil), chỉ ghi thẳng vào địa chỉ.
         @try {
-            void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
-            set_token(seed);
-            
-            id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
-            id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
-            void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
-            
-            set_state(seed, get_key(), get_state());
-            lq_log(@"✅ Bật xong Công Tắc Integrity State!");
+            *(volatile uint8_t  *)(slide + 0x036C0208) = 0;
+            *(volatile uint64_t *)(slide + 0x036C01F8) = 0xDEADBEEFDEADBEEF;
+            *(volatile uint64_t *)(slide + 0x036C0200) = 0xDEADBEEFDEADBEEF;
+            lq_log(@"\u2705 Bypass Validator — Integrity State OK!");
         } @catch (NSException *e) {
-            lq_log(@"❌ Lỗi bật công tắc: %@", e.reason);
+            lq_log(@"\u274c L\u1ed7i ghi RAM: %@", e.reason);
         }
 
         // BƯỚC 2: Khởi tạo Controller (Test Harness)

@@ -15,7 +15,7 @@ clang -isysroot "$SDK_PATH" \
       -fobjc-arc \
       -O2 \
       -o LQBypass.dylib \
-      LQBypass.m fishhook.c
+      LQBypass.m
 
 echo "=== Kiểm tra file sau biên dịch ==="
 ls -la LQBypass.dylib

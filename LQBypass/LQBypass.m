@@ -126,7 +126,9 @@ static void setup_log_window(void) {
     [s_logWindow addSubview:retryBtn];
 
     s_logWindow.hidden = NO;
-    [s_logWindow makeKeyAndVisible];
+    // KHÔNG gọi makeKeyAndVisible — game window phải giữ keyWindow
+    // initTapGes dùng keyWindow để đính floating button
+    // log window vẫn hiện do windowLevel cao hơn game
 }
 
 

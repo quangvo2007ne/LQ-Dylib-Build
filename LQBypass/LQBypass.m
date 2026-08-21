@@ -169,6 +169,16 @@ static uintptr_t get_awss3_slide_safe(void) {
 static id   global_ctrl  = nil;
 static BOOL menu_spawned = NO;
 
+// one_time_init chỉ được gọi 1 lần duy nhất (không idempotent nếu gọi lại)
+static void run_one_time_init(uintptr_t slide) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void (*fn)(void) = (void (*)(void))(slide + 0x02F54644);
+        @try { fn(); lq_log(@"✅ sub_2F54644 (one-time-init) done"); }
+        @catch (NSException *e) { lq_log(@"❌ sub_2F54644 ex: %@", e.reason); }
+    });
+}
+
 static void spawn_menu(void) {
     if (menu_spawned) return;
     menu_spawned = YES;
@@ -179,73 +189,77 @@ static void spawn_menu(void) {
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
 
-        // Bước 1: set seed (_apiclient_set_token)
+        // Bước 1: _apiclient_set_token(seed)
         NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
-        void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
-        @try { set_token(seed); lq_log(@"✅ set_token done"); }
-        @catch (NSException *e) { lq_log(@"❌ set_token ex: %@", e.reason); }
-
-        // Bước 2: _apiclient_get_key → sub_D94DB8 → sub_2F544A0 (integrity state)
-        // Thiếu bước này thì showMenu: sẽ check auth fail → không mở ImGui
-        id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
-        id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
-        void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
         @try {
+            void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
+            set_token(seed);
+            lq_log(@"✅ set_token done");
+        } @catch (NSException *e) { lq_log(@"❌ set_token ex: %@", e.reason); }
+
+        // Bước 2: integrity state — chỉ gọi nếu get_key/get_state trả non-nil
+        @try {
+            id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
+            id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
             id key   = get_key();
             id state = get_state();
-            lq_log(@"✅ get_key=%@ get_state=%@", key, state);
-            set_state(seed, key, state);
-            lq_log(@"✅ sub_2F544A0 integrity state set");
-        }
-        @catch (NSException *e) { lq_log(@"❌ integrity ex: %@", e.reason); }
+            lq_log(@"✅ get_key=%@ state=%@", key, state);
+            if (key && state) {
+                void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
+                set_state(seed, key, state);
+                lq_log(@"✅ sub_2F544A0 done");
+            } else {
+                lq_log(@"⚠️ key/state nil — skip sub_2F544A0, tiếp tục");
+            }
+        } @catch (NSException *e) { lq_log(@"❌ integrity ex: %@", e.reason); }
 
-        // Bước 3: one-time init
-        void (*one_time_init)(void) = (void (*)(void))(slide + 0x02F54644);
-        @try { one_time_init(); lq_log(@"✅ sub_2F54644 done"); }
-        @catch (NSException *e) { lq_log(@"❌ sub_2F54644 ex: %@", e.reason); }
+        // Bước 3: one-time init (dispatch_once — an toàn khi gọi nhiều lần)
+        run_one_time_init(slide);
 
         // Bước 4: initTapGes — tạo floating button + ImGuiDrawView
-        Class ctrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
-        if (!ctrlCls) { lq_log(@"❌ class not found"); return; }
-        lq_log(@"✅ class found: %@", NSStringFromClass(ctrlCls));
+        @try {
+            Class ctrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
+            if (!ctrlCls) { lq_log(@"❌ class not found"); return; }
+            lq_log(@"✅ class: %@", NSStringFromClass(ctrlCls));
 
-        global_ctrl = [[ctrlCls alloc] init];
-        lq_log(@"✅ alloc-init done: %@", global_ctrl);
+            global_ctrl = [[ctrlCls alloc] init];
+            lq_log(@"✅ alloc-init: %@", global_ctrl);
 
-        SEL sel = NSSelectorFromString(@"initTapGes");
-        if ([global_ctrl respondsToSelector:sel]) {
-            @try {
+            SEL sel = NSSelectorFromString(@"initTapGes");
+            if ([global_ctrl respondsToSelector:sel]) {
                 ((void (*)(id, SEL))objc_msgSend)(global_ctrl, sel);
-                lq_log(@"✅ initTapGes done — nút nổi xuất hiện!");
+                lq_log(@"✅ initTapGes done — floating button xuất hiện!");
+            } else {
+                lq_log(@"❌ initTapGes không respond");
             }
-            @catch (NSException *e) { lq_log(@"❌ initTapGes ex: %@", e.reason); }
-        } else {
-            lq_log(@"❌ initTapGes không respond");
-        }
+        } @catch (NSException *e) { lq_log(@"❌ initTapGes ex: %@", e.reason); }
 
-        // Bước 5: Bypass showMenu: auth check → force ImGui visible trực tiếp
-        // showMenu: gọi nội bộ check integrity state trước khi mở ImGui
-        // Gọi FWBwynoreHMvFPjuQkTf: trực tiếp để skip check đó
+        // Bước 5: Force ImGui visible
+        // Dùng direct memory write (đơn giản, không phụ thuộc ObjC runtime)
+        // g_menu_is_visible @ VA 0x36BD068 (từ lq_analysis.md FWBwynoreHMvFPjuQkTf: disasm)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            Class imguiCls = objc_getClass("ImGuiDrawView");
-            if (imguiCls) {
-                SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
-                if ([imguiCls respondsToSelector:setVis]) {
-                    @try {
+            @try {
+                // Cách 1: Ghi trực tiếp vào flag byte
+                uint8_t *flag = (uint8_t *)(slide + 0x36BD068);
+                *flag = 1;
+                lq_log(@"✅ g_menu_is_visible=1 (direct write) @ %p", flag);
+            } @catch (NSException *e) {
+                lq_log(@"❌ direct write ex: %@", e.reason);
+                // Cách 2: ObjC fallback
+                @try {
+                    Class imguiCls = objc_getClass("ImGuiDrawView");
+                    SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
+                    if (imguiCls && [imguiCls respondsToSelector:setVis]) {
                         ((void (*)(id, SEL, BOOL))objc_msgSend)(imguiCls, setVis, YES);
-                        lq_log(@"✅ ImGui force visible! Menu ESP đang mở...");
+                        lq_log(@"✅ ImGui ObjC fallback done");
                     }
-                    @catch (NSException *e) { lq_log(@"❌ ImGui force ex: %@", e.reason); }
-                } else {
-                    lq_log(@"❌ ImGuiDrawView không có FWBwynoreHMvFPjuQkTf:");
-                }
-            } else {
-                lq_log(@"❌ ImGuiDrawView class không tìm thấy");
+                } @catch (NSException *e2) { lq_log(@"❌ ObjC fallback ex: %@", e2.reason); }
             }
         });
     });
 }
+
 
 
 // Retry spawn — bấm nút "▶ Gọi Menu Lại" sau khi vào game

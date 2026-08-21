@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== Đang biên dịch LQBypass.dylib cho iOS ARM64 ==="
+echo "=== Đang biên dịch LQBypass.dylib v10.1 (+ fishhook stealth) ==="
 
 SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
 echo "SDK Path: $SDK_PATH"
@@ -15,7 +15,7 @@ clang -isysroot "$SDK_PATH" \
       -fobjc-arc \
       -O2 \
       -o LQBypass.dylib \
-      LQBypass.m
+      LQBypass.m fishhook.c
 
 echo "=== Kiểm tra file sau biên dịch ==="
 ls -la LQBypass.dylib

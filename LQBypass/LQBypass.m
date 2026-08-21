@@ -1,6 +1,6 @@
 // =========================================================================
-//  LQBypass.m — Tweak Dylib Cho Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 9.4: On-Screen Log + File Log (debug không cần jailbreak)
+//  LQBypass.m — Tweak Dylib Chủ Quản Liên Quân Mobile (AWSS3.framework)
+//  Phiên bản 10.1: Stealth (fishhook) + Direct RAM Bypass
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -8,6 +8,29 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#include "fishhook.h"
+
+// =========================================================
+// STEALTH LAYER — Ẩn LQBypass khỏi scan của anogs/ACE
+// anogs dùng _dyld_get_image_name x4 và dlopen x23 để điều tra
+// =========================================================
+static const char *(*orig_dyld_get_image_name)(uint32_t) = NULL;
+static const char *hook_dyld_get_image_name(uint32_t idx) {
+    const char *name = orig_dyld_get_image_name(idx);
+    if (name && strstr(name, "LQBypass")) {
+        // Giả vờ đây là một framework hệ thống bình thường
+        return "/System/Library/Frameworks/CoreData.framework/CoreData";
+    }
+    return name;
+}
+
+static void install_stealth_hooks(void) {
+    struct rebinding hooks[] = {
+        {"_dyld_get_image_name", (void *)hook_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
+    };
+    rebind_symbols(hooks, 1);
+}
 
 // =========================================================
 // ON-SCREEN LOG WINDOW — hiện thị log ngay trên màn hình
@@ -294,6 +317,10 @@ static void hook_makeKeyAndVisible(id self, SEL _cmd) {
 // =========================================================
 __attribute__((constructor))
 static void lq_init(void) {
+    // ⚡ STEALTH TRƯỚC TIÊN — chạy đồng bộ ngay khi dylib load
+    // Đảm bảo anogs chưa kịp quét thì hook đã được cài
+    install_stealth_hooks();
+
     // Hook UIWindow để đợi UI sẵn sàng
     dispatch_async(dispatch_get_main_queue(), ^{
         Class winCls = objc_getClass("UIWindow");

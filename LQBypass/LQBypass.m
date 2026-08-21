@@ -188,9 +188,9 @@ static void spawn_menu(void) {
         global_ctrl = [[ctrlCls alloc] init];
         lq_log(@"✅ alloc-init done: %@", global_ctrl);
 
-        // BƯỚC 2: Lưu controller vào global 0x036BDFD0 đúng chuẩn ARC (tránh crash rác bộ nhớ)
-        id *global_ptr = (id *)(slide + 0x036BDFD0);
-        objc_storeStrong(global_ptr, global_ctrl);
+        // BƯỚC 2: Lưu controller vào global 0x036BDFD0 (bằng con trỏ thô để tránh lỗi ARC)
+        void **global_ptr = (void **)(slide + 0x036BDFD0);
+        *global_ptr = (__bridge_retained void *)global_ctrl; // Retain +1 vào vùng nhớ C
         lq_log(@"✅ Đã lưu controller vào global 0x036BDFD0!");
 
         // BƯỚC 3: Dựng giao diện Nút nổi

@@ -7,18 +7,45 @@
 #import <objc/message.h>
 
 // ==========================================
+// HỆ THỐNG GHI LOG RA FILE (Dành cho người dùng Windows)
+// ==========================================
+static void dump_log(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+static void dump_log(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    // 1. In ra Console (xem qua 3uTools hoặc Sideloadly)
+    NSLog(@"%@", msg);
+
+    // 2. Ghi ra file lqdump_log.txt trong Documents (Lấy qua 3uTools -> Files)
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *logPath = [docs stringByAppendingPathComponent:@"lqdump_log.txt"];
+    NSString *line = [msg stringByAppendingString:@"\n"];
+    
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (!fh) {
+        [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    }
+}
+
+// ==========================================
 // 1. DUMP AES CRYPTO (Bắt gói tin Network)
 // ==========================================
 @implementation NSString (LQDump)
 - (NSString *)lq_AES256EncryptWithKey:(NSString *)key {
-    NSLog(@"[LQDump] 📤 ĐANG GỬI DATA LÊN SERVER (Trước mã hóa):\n%@", self);
-    // Gọi lại hàm gốc (do đã tráo ruột)
+    dump_log(@"[LQDump] 📤 ĐANG GỬI DATA LÊN SERVER (Trước mã hóa):\n%@", self);
     return [self lq_AES256EncryptWithKey:key];
 }
 
 - (NSString *)lq_AES256DecryptWithKey:(NSString *)key {
     NSString *decrypted = [self lq_AES256DecryptWithKey:key];
-    NSLog(@"[LQDump] 📥 DATA TRẢ VỀ TỪ SERVER (Sau giải mã):\n%@", decrypted);
+    dump_log(@"[LQDump] 📥 DATA TRẢ VỀ TỪ SERVER (Sau giải mã):\n%@", decrypted);
     return decrypted;
 }
 @end
@@ -29,13 +56,12 @@
 @interface LQDumpHelper : NSObject @end
 @implementation LQDumpHelper
 - (void)lq_showErrorWithTitle:(NSString *)title message:(NSString *)msg buttonTitle:(NSString *)btn {
-    NSLog(@"[LQDump] ❌ THÔNG BÁO LỖI: [%@] %@", title, msg);
-    // Gọi lại hàm gốc
+    dump_log(@"[LQDump] ❌ THÔNG BÁO LỖI: [%@] %@", title, msg);
     [self lq_showErrorWithTitle:title message:msg buttonTitle:btn];
 }
 
 - (void)lq_showSuccessWithTitle:(NSString *)title message:(NSString *)msg {
-    NSLog(@"[LQDump] ✅ THÀNH CÔNG: [%@] %@", title, msg);
+    dump_log(@"[LQDump] ✅ THÀNH CÔNG: [%@] %@", title, msg);
     [self lq_showSuccessWithTitle:title message:msg];
 }
 @end

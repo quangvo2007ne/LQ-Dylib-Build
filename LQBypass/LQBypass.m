@@ -33,6 +33,9 @@ static void install_stealth_hooks(void) {
     rebind_symbols(hooks, 1);
 }
 
+// Forward declaration (định nghĩa đầy đủ ở bên dưới)
+static void lq_log(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+
 // =========================================================
 // PATCH RUNTIME — tắt vòng reset visible trong drawInMTKView:
 // =========================================================

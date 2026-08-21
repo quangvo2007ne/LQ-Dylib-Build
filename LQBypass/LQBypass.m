@@ -179,32 +179,8 @@ static void spawn_menu(void) {
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
 
-        // Bước 1: set seed (_apiclient_set_token)
-        NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
-        void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
-        @try { set_token(seed); lq_log(@"✅ set_token done"); }
-        @catch (NSException *e) { lq_log(@"❌ set_token ex: %@", e.reason); }
-
-        // Bước 2: _apiclient_get_key → sub_D94DB8 → sub_2F544A0 (integrity state)
-        // Thiếu bước này thì showMenu: sẽ check auth fail → không mở ImGui
-        id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
-        id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
-        void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
-        @try {
-            id key   = get_key();
-            id state = get_state();
-            lq_log(@"✅ get_key=%@ get_state=%@", key, state);
-            set_state(seed, key, state);
-            lq_log(@"✅ sub_2F544A0 integrity state set");
-        }
-        @catch (NSException *e) { lq_log(@"❌ integrity ex: %@", e.reason); }
-
-        // Bước 3: one-time init
-        void (*one_time_init)(void) = (void (*)(void))(slide + 0x02F54644);
-        @try { one_time_init(); lq_log(@"✅ sub_2F54644 done"); }
-        @catch (NSException *e) { lq_log(@"❌ sub_2F54644 ex: %@", e.reason); }
-
-        // Bước 4: initTapGes — tạo floating button + ImGuiDrawView
+        // BƯỚC 1: Khởi tạo Controller (Test Harness)
+        // Bỏ qua toàn bộ Network, Auth, sub_2F544A0 và sub_2F54644 (watchdog) vì chúng gây crash!
         Class ctrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (!ctrlCls) { lq_log(@"❌ class not found"); return; }
         lq_log(@"✅ class found: %@", NSStringFromClass(ctrlCls));
@@ -212,13 +188,12 @@ static void spawn_menu(void) {
         global_ctrl = [[ctrlCls alloc] init];
         lq_log(@"✅ alloc-init done: %@", global_ctrl);
 
-        // BƯỚC NGOẶT: Lưu controller vào global 0x036BDFD0!
-        // Touch-forwarder (kdgovOiKdLgyHlHZTbgV) đọc controller từ địa chỉ này để truyền cảm ứng.
-        // Thiếu bước này, Menu hiện ra nhưng sẽ bị "chết" (không bấm được).
-        void **global_ptr = (void **)(slide + 0x036BDFD0);
-        *global_ptr = (__bridge void *)global_ctrl;
+        // BƯỚC 2: Lưu controller vào global 0x036BDFD0 đúng chuẩn ARC (tránh crash rác bộ nhớ)
+        id *global_ptr = (id *)(slide + 0x036BDFD0);
+        objc_storeStrong(global_ptr, global_ctrl);
         lq_log(@"✅ Đã lưu controller vào global 0x036BDFD0!");
 
+        // BƯỚC 3: Dựng giao diện Nút nổi
         SEL sel = NSSelectorFromString(@"initTapGes");
         if ([global_ctrl respondsToSelector:sel]) {
             @try {
@@ -230,25 +205,14 @@ static void spawn_menu(void) {
             lq_log(@"❌ initTapGes không respond");
         }
 
-        // Bước 5: Bypass showMenu: auth check → force ImGui visible trực tiếp
-        // showMenu: gọi nội bộ check integrity state trước khi mở ImGui
-        // Gọi FWBwynoreHMvFPjuQkTf: trực tiếp để skip check đó
+        // BƯỚC 4: Force ImGui visible trực tiếp bằng cờ Memory
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            Class imguiCls = objc_getClass("ImGuiDrawView");
-            if (imguiCls) {
-                SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
-                if ([imguiCls respondsToSelector:setVis]) {
-                    @try {
-                        ((void (*)(id, SEL, BOOL))objc_msgSend)(imguiCls, setVis, YES);
-                        lq_log(@"✅ ImGui force visible! Menu ESP đang mở...");
-                    }
-                    @catch (NSException *e) { lq_log(@"❌ ImGui force ex: %@", e.reason); }
-                } else {
-                    lq_log(@"❌ ImGuiDrawView không có FWBwynoreHMvFPjuQkTf:");
-                }
-            } else {
-                lq_log(@"❌ ImGuiDrawView class không tìm thấy");
+            @try {
+                *(uint8_t *)(slide + 0x36BD068) = 1;
+                lq_log(@"✅ Ép cờ g_menu_is_visible = 1 thành công!");
+            } @catch (NSException *e) {
+                lq_log(@"❌ Lỗi ghi cờ: %@", e.reason);
             }
         });
     });

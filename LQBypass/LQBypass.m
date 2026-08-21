@@ -197,6 +197,67 @@ static uintptr_t get_awss3_slide_safe(void) {
 // =========================================================
 static id   global_ctrl  = nil;
 static BOOL menu_spawned = NO;
+static uintptr_t g_slide = 0; // Lưu slide cho hook dùng
+
+// ------- Hook showMenu: — bypass gesture.state check -------
+static IMP orig_showMenu = NULL;
+static void hook_showMenu(id self, SEL _cmd, id gesture) {
+    // Không quan tâm gesture.state — đưa thẳng tới bật ImGui
+    lq_log(@"👀 showMenu: bị bắt — ép visible...");
+    @try {
+        // Ưu tiên: gọi class method chính thức
+        Class imguiCls = objc_getClass("ImGuiDrawView");
+        if (imguiCls) {
+            SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
+            if ([imguiCls respondsToSelector:setVis]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(imguiCls, setVis, YES);
+                lq_log(@"\u2705 FWBwynoreHMvFPjuQkTf:YES — ImGui ON!");
+            }
+        }
+        // Dự phòng: ghi thẳng cờ
+        if (g_slide) {
+            *(volatile uint8_t *)(g_slide + 0x36BD068) = 1;
+            *(volatile uint8_t *)(g_slide + 0x036C2480) = 0; // inverse_visibility
+        }
+        // Gọi resetIconVisibilityTimer để giữ trạng thái ổn định
+        SEL resetSel = NSSelectorFromString(@"resetIconVisibilityTimer");
+        if (self && [self respondsToSelector:resetSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(self, resetSel);
+        }
+    } @catch (NSException *e) {
+        lq_log(@"\u274c hook_showMenu ex: %@", e.reason);
+    }
+}
+
+static void install_showmenu_hook(id ctrl) {
+    Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
+    if (!cls) return;
+    SEL sel = NSSelectorFromString(@"showMenu:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m) {
+        orig_showMenu = method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_showMenu);
+        lq_log(@"\u2705 Hook showMenu: đã cài!");
+    }
+}
+
+static void force_imgui_visible(uintptr_t slide) {
+    @try {
+        Class imguiCls = objc_getClass("ImGuiDrawView");
+        if (imguiCls) {
+            SEL setVis = NSSelectorFromString(@"FWBwynoreHMvFPjuQkTf:");
+            if ([imguiCls respondsToSelector:setVis]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(imguiCls, setVis, YES);
+                lq_log(@"\u2705 force_imgui: class method OK");
+            }
+        }
+        *(volatile uint8_t *)(slide + 0x36BD068) = 1;
+        *(volatile uint8_t *)(slide + 0x036C2480) = 0;
+        lq_log(@"\u2705 force_imgui: flags OK");
+    } @catch (NSException *e) {
+        lq_log(@"\u274c force_imgui ex: %@", e.reason);
+    }
+}
 
 static void spawn_menu(void) {
     if (menu_spawned) return;
@@ -207,6 +268,7 @@ static void spawn_menu(void) {
 
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
+        g_slide = slide; 
 
         // BƯỚC 1: Ghi thẳng vào RAM để "đánh lừa" Validator (sub_2F545C4)
         // Validator kiểm tra:
@@ -247,7 +309,10 @@ static void spawn_menu(void) {
             lq_log(@"❌ initTapGes không respond");
         }
 
-        // BƯỚC 4: Đồng bộ màu nút (luồng chuẩn game gọi)
+        // BƯỚC 4: Cài hook showMenu:
+        install_showmenu_hook(global_ctrl);
+
+        // BƯỚC 5: Đồng bộ màu nút (luồng chuẩn game gọi)
         SEL selSetup = NSSelectorFromString(@"setupFloatingToggleButtons");
         if ([global_ctrl respondsToSelector:selSetup]) {
             @try {
@@ -257,25 +322,10 @@ static void spawn_menu(void) {
             @catch (NSException *e) { lq_log(@"❌ setupFloating ex: %@", e.reason); }
         }
 
-        // BƯỚC 5: Force ImGui visible bằng cách gọi thẳng showMenu: với Cử chỉ giả
-        // Thay vì ghi RAM trực tiếp làm lệch state inverse_visibility (0x036C2480),
-        // Ta gọi showMenu: để game tự render full luồng an toàn.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+        // BƯỚC 6: Force ImGui visible sau 2s (triple: class method + g_menu_is_visible + inverse flag)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            @try {
-                LQMockGesture *mock = [[LQMockGesture alloc] init];
-                mock.state = 3; // UIGestureRecognizerStateEnded = 3
-                
-                SEL showSel = NSSelectorFromString(@"showMenu:");
-                if ([global_ctrl respondsToSelector:showSel]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(global_ctrl, showSel, mock);
-                    lq_log(@"✅ Đã ép bung Menu bằng MockGesture thành công!");
-                } else {
-                    lq_log(@"❌ Không tìm thấy showMenu:");
-                }
-            } @catch (NSException *e) {
-                lq_log(@"❌ Lỗi gọi showMenu: %@", e.reason);
-            }
+            force_imgui_visible(slide);
         });
     });
 }

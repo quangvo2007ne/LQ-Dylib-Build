@@ -185,8 +185,25 @@ static void spawn_menu(void) {
         uintptr_t slide = get_awss3_slide_safe();
         if (!slide) { lq_log(@"❌ slide=0 abort"); return; }
 
-        // BƯỚC 1: Khởi tạo Controller (Test Harness)
-        // Bỏ qua toàn bộ Network, Auth, sub_2F544A0 và sub_2F54644 (watchdog) vì chúng gây crash!
+        // BƯỚC 1: Bật các "Công Tắc Phụ" (Integrity State)
+        // Nếu thiếu bước này, hàm showMenu: sẽ thấy thiếu dữ liệu và từ chối mở Menu!
+        // Lưu ý: Tuyệt đối KHÔNG gọi hàm Watchdog (0x02F54644) vì nó sẽ gây văng game.
+        NSString *seed = @"DKehoXVTzOryt1T8/K5V838ftfFHNho8CuP41+HTiNCNi0nwolEDstMEOrlEsxHyiUUj4M/7hRwYD6VApIf9c3kkgQYy6dWE/B69+eT5F0g=";
+        @try {
+            void (*set_token)(id) = (void (*)(id))(slide + 0x00CB80A0);
+            set_token(seed);
+            
+            id (*get_key)(void)   = (id (*)(void))(slide + 0x00D2860C);
+            id (*get_state)(void) = (id (*)(void))(slide + 0x00D94DB8);
+            void (*set_state)(id, id, id) = (void (*)(id, id, id))(slide + 0x02F544A0);
+            
+            set_state(seed, get_key(), get_state());
+            lq_log(@"✅ Bật xong Công Tắc Integrity State!");
+        } @catch (NSException *e) {
+            lq_log(@"❌ Lỗi bật công tắc: %@", e.reason);
+        }
+
+        // BƯỚC 2: Khởi tạo Controller (Test Harness)
         Class ctrlCls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
         if (!ctrlCls) { lq_log(@"❌ class not found"); return; }
         lq_log(@"✅ class found: %@", NSStringFromClass(ctrlCls));

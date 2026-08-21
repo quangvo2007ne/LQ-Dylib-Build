@@ -10,6 +10,7 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <sys/mman.h>
+#import <libkern/OSCacheControl.h>
 #include "fishhook.h"
 
 // =========================================================
@@ -59,7 +60,7 @@ static BOOL patch_draw_reset(uintptr_t slide) {
 
     // Ghi 4 byte
     *(uint32_t *)patch_va = instr;
-    __builtin___clear_cache((char *)patch_va, (char *)(patch_va + 4));
+    sys_icache_invalidate((void *)patch_va, 4); // flush instruction cache ARM64
 
     // Trả về RX
     mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_EXEC);

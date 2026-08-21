@@ -91,6 +91,16 @@ static void setup_log_window(void) {
     [closeBtn addTarget:nil action:@selector(lq_hide_log) forControlEvents:UIControlEventTouchUpInside];
     [s_logWindow addSubview:closeBtn];
 
+    // Nút RETRY — bấm sau khi vào game để spawn menu vào rootVC hiện tại
+    UIButton *retryBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    retryBtn.frame = CGRectMake(10, 30, 130, 28);
+    retryBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.1 alpha:0.85];
+    retryBtn.layer.cornerRadius = 6;
+    [retryBtn setTitle:@"▶ Gọi Menu Lại" forState:UIControlStateNormal];
+    [retryBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [retryBtn addTarget:nil action:@selector(lq_retry_spawn) forControlEvents:UIControlEventTouchUpInside];
+    [s_logWindow addSubview:retryBtn];
+
     s_logWindow.hidden = NO;
     [s_logWindow makeKeyAndVisible];
 }
@@ -99,6 +109,16 @@ static void setup_log_window(void) {
 __attribute__((visibility("default")))
 void lq_hide_log(void) {
     s_logWindow.hidden = YES;
+}
+
+// Retry spawn — bấm nút "▶ Gọi Menu Lại" sau khi vào game
+__attribute__((visibility("default")))
+void lq_retry_spawn(void) {
+    lq_log(@"🔄 Retry bởi user...");
+    // Reset flag để spawn lại
+    menu_spawned = NO;
+    global_ctrl  = nil;
+    spawn_menu();
 }
 
 // =========================================================

@@ -110,16 +110,7 @@ __attribute__((visibility("default")))
 void lq_hide_log(void) {
     s_logWindow.hidden = YES;
 }
-
-// Retry spawn — bấm nút "▶ Gọi Menu Lại" sau khi vào game
-__attribute__((visibility("default")))
-void lq_retry_spawn(void) {
-    lq_log(@"🔄 Retry bởi user...");
-    // Reset flag để spawn lại
-    menu_spawned = NO;
-    global_ctrl  = nil;
-    spawn_menu();
-}
+// lq_retry_spawn được định nghĩa sau phần SPAWN MENU (tránh forward-decl lỗi)
 
 // =========================================================
 // LẤY SLIDE AN TOÀN (không dùng _dyld_get_image_name bị hook)
@@ -191,6 +182,16 @@ static void spawn_menu(void) {
             lq_log(@"❌ initTapGes không respond");
         }
     });
+}
+
+// Retry spawn — bấm nút "▶ Gọi Menu Lại" sau khi vào game
+// Phải đặt SAU spawn_menu để compiler thấy khai báo
+__attribute__((visibility("default")))
+void lq_retry_spawn(void) {
+    lq_log(@"🔄 Retry bởi user...");
+    menu_spawned = NO;
+    global_ctrl  = nil;
+    spawn_menu();
 }
 
 // =========================================================

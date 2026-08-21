@@ -49,61 +49,86 @@ static void lq_log(NSString *fmt, ...) {
     });
 }
 
+// =========================================================
+// HELPER CLASS — target cho UIButton (target:nil không hoạt động)
+// =========================================================
+@interface LQHelper : NSObject
++ (instancetype)shared;
+- (void)didTapHide;
+- (void)didTapRetry;
+@end
+
+@implementation LQHelper
++ (instancetype)shared {
+    static LQHelper *inst;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ inst = [[LQHelper alloc] init]; });
+    return inst;
+}
+- (void)didTapHide  { s_logWindow.hidden = YES; }
+- (void)didTapRetry {
+    // Reset và spawn lại — được gọi khi đã vào game
+    extern void lq_retry_spawn(void);
+    lq_retry_spawn();
+}
+@end
+
 static void setup_log_window(void) {
     // File log trong Documents
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     s_logFilePath = [docs stringByAppendingPathComponent:@"lqbypass_log.txt"];
     [@"=== LQBypass v9.4 Log Start ===\n" writeToFile:s_logFilePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
-    // UIWindow overlay
+    // UIWindow nhỏ — chỉ chiếm 1/3 trên màn hình, không che gameplay
+    CGFloat W = [UIScreen mainScreen].bounds.size.width;
+    CGFloat H = 300.0f; // chiều cao cố định
     UIWindowScene *scene = nil;
     for (UIWindowScene *ws in [UIApplication sharedApplication].connectedScenes) {
-        if (ws.activationState == UISceneActivationStateForegroundActive) {
-            scene = ws;
-            break;
-        }
+        if (ws.activationState == UISceneActivationStateForegroundActive) { scene = ws; break; }
     }
-
     if (@available(iOS 13.0, *)) {
         if (scene) s_logWindow = [[UIWindow alloc] initWithWindowScene:scene];
     }
-    if (!s_logWindow) s_logWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    if (!s_logWindow) s_logWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, W, H)];
+    else s_logWindow.frame = CGRectMake(0, 0, W, H);
 
     s_logWindow.windowLevel = UIWindowLevelAlert + 100;
-    s_logWindow.backgroundColor = [UIColor colorWithWhite:0 alpha:0.65];
+    s_logWindow.backgroundColor = [UIColor colorWithWhite:0 alpha:0.70];
     s_logWindow.userInteractionEnabled = YES;
 
-    // Semi-transparent text view
-    CGRect frame = CGRectMake(10, 60, [UIScreen mainScreen].bounds.size.width - 20, 260);
-    s_logView = [[UITextView alloc] initWithFrame:frame];
-    s_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.0];
+    // Text view log
+    s_logView = [[UITextView alloc] initWithFrame:CGRectMake(8, 60, W - 16, 230)];
+    s_logView.backgroundColor = [UIColor clearColor];
     s_logView.textColor        = [UIColor greenColor];
     s_logView.font             = [UIFont fontWithName:@"Courier" size:11];
     s_logView.editable         = NO;
     s_logView.text             = @"";
     [s_logWindow addSubview:s_logView];
 
-    // Nút tắt log overlay
+    // Nút [Ẩn] — dùng LQHelper làm target
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 30, 60, 28);
+    closeBtn.frame = CGRectMake(W - 70, 16, 60, 34);
+    closeBtn.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.9];
+    closeBtn.layer.cornerRadius = 6;
     [closeBtn setTitle:@"[Ẩn]" forState:UIControlStateNormal];
     [closeBtn setTitleColor:[UIColor yellowColor] forState:UIControlStateNormal];
-    [closeBtn addTarget:nil action:@selector(lq_hide_log) forControlEvents:UIControlEventTouchUpInside];
+    [closeBtn addTarget:[LQHelper shared] action:@selector(didTapHide) forControlEvents:UIControlEventTouchUpInside];
     [s_logWindow addSubview:closeBtn];
 
-    // Nút RETRY — bấm sau khi vào game để spawn menu vào rootVC hiện tại
+    // Nút ▶ Gọi Menu Lại — dùng LQHelper làm target
     UIButton *retryBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    retryBtn.frame = CGRectMake(10, 30, 130, 28);
-    retryBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.1 alpha:0.85];
+    retryBtn.frame = CGRectMake(8, 16, 145, 34);
+    retryBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.55 blue:0.1 alpha:0.9];
     retryBtn.layer.cornerRadius = 6;
-    [retryBtn setTitle:@"▶ Gọi Menu Lại" forState:UIControlStateNormal];
+    [retryBtn setTitle:@"▶ Gọi Menu (sau login)" forState:UIControlStateNormal];
     [retryBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [retryBtn addTarget:nil action:@selector(lq_retry_spawn) forControlEvents:UIControlEventTouchUpInside];
+    [retryBtn addTarget:[LQHelper shared] action:@selector(didTapRetry) forControlEvents:UIControlEventTouchUpInside];
     [s_logWindow addSubview:retryBtn];
 
     s_logWindow.hidden = NO;
     [s_logWindow makeKeyAndVisible];
 }
+
 
 // Ẩn log window
 __attribute__((visibility("default")))

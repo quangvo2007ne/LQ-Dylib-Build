@@ -88,36 +88,35 @@ static void install_termination_hooks(void) {
 static void lq_log(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 
 // =========================================================
-// PATCH RUNTIME — tắt vòng reset visible trong drawInMTKView:
+// SWIZZLE drawInMTKView: — fix vĩnh viễn reset visible mỗi frame
 // =========================================================
-// drawInMTKView: gọi validator rồi reset visible=0 mỗi frame nếu validator fail:
-//   0x02EE83B8  BL   sub_2F545C4
-//   0x02EE83BC  TBNZ W0,#0,0x02EE83C8   ; nếu valid→skip
-//   0x02EE83C0  ADRP X8, 0x036BD000
-//   0x02EE83C4  STRB WZR, [X8,#0x68]   ; visible = 0  ← 600+ lần/phiên!
-// Fix: thay TBNZ bằng B unconditional → luôn skip reset
-//   0x02EE83BC  B 0x02EE83C8  = 0x14000003
-static BOOL patch_draw_reset(uintptr_t slide) {
-    uintptr_t patch_va  = slide + 0x02EE83BC;  // địa chỉ runtime
-    uint32_t  instr     = 0x14000003;          // B +12 byte (bản le)
-    uintptr_t page_addr = patch_va & ~0xFFFUL; // căn chỉnh trang 4 KB
+// Phát hiện từ Frida: mprotect KHÔNG hoạt động trên iOS (W^X).
+// ObjC swizzle hoạt động hoàn hảo — sau mỗi frame render, ép visible=1.
+// MemoryAccessMonitor xác nhận: reset_sources=0 khi hook này chạy.
+static IMP orig_drawInMTKView = NULL;
+static uintptr_t g_slide_for_draw = 0;
 
-    // Mở quyền ghi
-    if (mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        lq_log(@"\u274c patch_draw_reset: mprotect RWX fail (errno=%d)", errno);
-        return NO;
+static void hook_drawInMTKView(id self, SEL _cmd, id view) {
+    // Gọi original (để Metal render bình thường)
+    if (orig_drawInMTKView) ((void (*)(id, SEL, id))orig_drawInMTKView)(self, _cmd, view);
+    // Sau mỗi frame: ép visible=1 — ngăn validator reset
+    if (g_slide_for_draw) {
+        *(volatile uint8_t *)(g_slide_for_draw + 0x036BD068) = 1;
     }
-
-    // Ghi 4 byte
-    *(uint32_t *)patch_va = instr;
-    sys_icache_invalidate((void *)patch_va, 4); // flush instruction cache ARM64
-
-    // Trả về RX
-    mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_EXEC);
-
-    lq_log(@"\u2705 patch_draw_reset: đã ghi B @ 0x02EE83BC → visible sẽ không bị reset mỗi frame!");
-    return YES;
 }
+
+static void install_draw_hook(uintptr_t slide) {
+    g_slide_for_draw = slide;
+    Class cls = objc_getClass("ImGuiDrawView");
+    if (!cls) { lq_log(@"❌ draw_hook: ImGuiDrawView not found"); return; }
+    SEL sel = NSSelectorFromString(@"drawInMTKView:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) { lq_log(@"❌ draw_hook: drawInMTKView: not found"); return; }
+    orig_drawInMTKView = method_getImplementation(m);
+    method_setImplementation(m, (IMP)hook_drawInMTKView);
+    lq_log(@"✅ Hook drawInMTKView: OK — visible=1 sau mỗi frame!");
+}
+
 
 // =========================================================
 // ON-SCREEN LOG WINDOW — hiện thị log ngay trên màn hình
@@ -409,8 +408,9 @@ static void spawn_menu(void) {
             @catch (NSException *e) { lq_log(@"❌ setupFloating ex: %@", e.reason); }
         }
 
-        // BƯỚC 6: Patch runtime — ngăn drawInMTKView: reset visible về 0 mỗi frame
-        patch_draw_reset(slide);
+        // BƯỚC 6: Swizzle drawInMTKView: — sau mỗi frame ép visible=1
+        // (mprotect KHÔNG hoạt động iOS W^X, ObjC swizzle hoạt động hoàn hảo)
+        install_draw_hook(slide);
 
         // BƯỚC 7: Force ImGui visible sau 2s (sau khi patch đã có hiệu lực)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),

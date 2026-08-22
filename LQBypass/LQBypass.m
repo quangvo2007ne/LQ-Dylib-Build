@@ -88,38 +88,35 @@ static void install_termination_hooks(void) {
 static void lq_log(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 
 // =========================================================
-// SWIZZLE drawInMTKView: — giữ visible=1 sau mỗi frame render
-// Không cần mprotect/code-page write → an toàn trên non-jailbreak iOS
+// PATCH RUNTIME — tắt vòng reset visible trong drawInMTKView:
 // =========================================================
-static IMP orig_drawInMTKView = NULL;
-static uintptr_t g_slide_for_draw = 0;
+// drawInMTKView: gọi validator rồi reset visible=0 mỗi frame nếu validator fail:
+//   0x02EE83B8  BL   sub_2F545C4
+//   0x02EE83BC  TBNZ W0,#0,0x02EE83C8   ; nếu valid→skip
+//   0x02EE83C0  ADRP X8, 0x036BD000
+//   0x02EE83C4  STRB WZR, [X8,#0x68]   ; visible = 0  ← 600+ lần/phiên!
+// Fix: thay TBNZ bằng B unconditional → luôn skip reset
+//   0x02EE83BC  B 0x02EE83C8  = 0x14000003
+static BOOL patch_draw_reset(uintptr_t slide) {
+    uintptr_t patch_va  = slide + 0x02EE83BC;  // địa chỉ runtime
+    uint32_t  instr     = 0x14000003;          // B +12 byte (bản le)
+    uintptr_t page_addr = patch_va & ~0xFFFUL; // căn chỉnh trang 4 KB
 
-static void hook_drawInMTKView(id self, SEL _cmd, id view) {
-    // Trước khi render: set visible=1
-    if (g_slide_for_draw) {
-        *(volatile uint8_t *)(g_slide_for_draw + 0x36BD068) = 1;
+    // Mở quyền ghi
+    if (mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        lq_log(@"\u274c patch_draw_reset: mprotect RWX fail (errno=%d)", errno);
+        return NO;
     }
-    // Gọi hàm gốc (nội dung render thật)
-    if (orig_drawInMTKView) {
-        ((void (*)(id, SEL, id))orig_drawInMTKView)(self, _cmd, view);
-    }
-    // Sau khi render: set lại visible=1 (phòng validator vừa reset)
-    if (g_slide_for_draw) {
-        *(volatile uint8_t *)(g_slide_for_draw + 0x36BD068) = 1;
-        *(volatile uint8_t *)(g_slide_for_draw + 0x036C2480) = 0; // inverse
-    }
-}
 
-static void install_draw_swizzle(uintptr_t slide) {
-    g_slide_for_draw = slide;
-    Class imguiCls = objc_getClass("ImGuiDrawView");
-    if (!imguiCls) { lq_log(@"\u274c install_draw_swizzle: class not found"); return; }
-    SEL sel = NSSelectorFromString(@"drawInMTKView:");
-    Method m = class_getInstanceMethod(imguiCls, sel);
-    if (!m) { lq_log(@"\u274c install_draw_swizzle: method not found"); return; }
-    orig_drawInMTKView = method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_drawInMTKView);
-    lq_log(@"\u2705 Swizzle drawInMTKView: done — visible sẽ luôn=1 sau mỗi frame!");
+    // Ghi 4 byte
+    *(uint32_t *)patch_va = instr;
+    sys_icache_invalidate((void *)patch_va, 4); // flush instruction cache ARM64
+
+    // Trả về RX
+    mprotect((void *)page_addr, 0x1000, PROT_READ | PROT_EXEC);
+
+    lq_log(@"\u2705 patch_draw_reset: đã ghi B @ 0x02EE83BC → visible sẽ không bị reset mỗi frame!");
+    return YES;
 }
 
 // =========================================================
@@ -412,8 +409,8 @@ static void spawn_menu(void) {
             @catch (NSException *e) { lq_log(@"❌ setupFloating ex: %@", e.reason); }
         }
 
-        // BƯỚC 6: Swizzle drawInMTKView: — giữ visible=1 sau mỗi frame (không cần mprotect!)
-        install_draw_swizzle(slide);
+        // BƯỚC 6: Patch runtime — ngăn drawInMTKView: reset visible về 0 mỗi frame
+        patch_draw_reset(slide);
 
         // BƯỚC 7: Force ImGui visible sau 2s (sau khi patch đã có hiệu lực)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
@@ -441,37 +438,42 @@ static void (*orig_makeKeyAndVisible)(id, SEL);
 static void hook_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
 
-    // Dùng makeKeyAndVisible chỉ để setup log window sớm
-    static dispatch_once_t logOnce;
-    dispatch_once(&logOnce, ^{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             setup_log_window();
-            lq_log(@"⚡ Log window ready — chờ app fully active rồi spawn menu...");
-        });
-    });
-}
+            lq_log(@"⚡ Log window ready — polling chờ Unity ready...");
 
-// Observer UIApplicationDidBecomeActive — trigger chính xác hơn makeKeyAndVisible
-// Unity thực sự sẵn sàng sau lần didBecomeActive thứ 2 (sau loading screen)
-static int s_active_count = 0;
-static void on_app_did_become_active(CFNotificationCenterRef c,
-                                     void *o, CFStringRef n,
-                                     const void *obj, CFDictionaryRef i) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        s_active_count++;
-        lq_log(@"📱 didBecomeActive #%d", s_active_count);
-
-        // Lần 1: app mới start (loading screen), còn quá sớm
-        // Lần 2+: game thực sự đang chạy → spawn menu sau 6s
-        if (s_active_count >= 1 && !menu_spawned) {
-            double delay = (s_active_count == 1) ? 6.0 : 3.0;
-            lq_log(@"⏳ Sẽ spawn menu sau %.0fs...", delay);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                           (int64_t)(delay * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                spawn_menu();
+            // Polling thay vì delay cố định.
+            // Frida -f thêm ~2s trước resume → Unity kịp load → menu hiện.
+            // Mở thường thiếu delay đó → LQBypass chạy quá sớm → race.
+            // Fix: thử mỗi 1s cho đến khi UnityDefaultViewController xuất hiện.
+            __block int attempt = 0;
+            __block dispatch_source_t timer = dispatch_source_create(
+                DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            dispatch_source_set_timer(timer,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                (uint64_t)(1.0 * NSEC_PER_SEC), 0);
+            dispatch_source_set_event_handler(timer, ^{
+                attempt++;
+                // Kiểm tra Unity view controller đã ready chưa
+                UIViewController *root = [UIApplication sharedApplication]
+                    .keyWindow.rootViewController;
+                NSString *clsName = root ? NSStringFromClass([root class]) : @"nil";
+                BOOL unityReady = (root != nil &&
+                    ([clsName containsString:@"Unity"] ||
+                     [clsName containsString:@"Game"]  ||
+                     attempt >= 8)); // Timeout sau 8s bất kể
+                lq_log(@"⏳ Poll #%d — rootVC: %@%@",
+                       attempt, clsName, unityReady ? @" ✅ READY" : @"");
+                if (unityReady) {
+                    dispatch_source_cancel(timer);
+                    timer = nil;
+                    spawn_menu();
+                }
             });
-        }
+            dispatch_resume(timer);
+        });
     });
 }
 
@@ -487,16 +489,6 @@ static void lq_init(void) {
     // 🛡 BẪY WATCHDOG — hook exit/abort/kill trước khi Constructor 6 watchdog timer kịp bắn
     // Đây chính là lý do menu hiện khi chạy Frida termination observer
     install_termination_hooks();
-
-    // 📱 Lắng nghe UIApplicationDidBecomeActive — trigger chính xác khi game sẵn sàng
-    CFNotificationCenterAddObserver(
-        CFNotificationCenterGetLocalCenter(),
-        NULL,
-        on_app_did_become_active,
-        CFSTR("UIApplicationDidBecomeActiveNotification"),
-        NULL,
-        CFNotificationSuspensionBehaviorDeliverImmediately
-    );
 
     // Hook UIWindow để đợi UI sẵn sàng
     dispatch_async(dispatch_get_main_queue(), ^{

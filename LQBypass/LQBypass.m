@@ -442,37 +442,13 @@ static void hook_makeKeyAndVisible(id self, SEL _cmd) {
     dispatch_once(&once, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             setup_log_window();
-            lq_log(@"⚡ Log window ready — polling chờ Unity ready...");
-
-            // Polling thay vì delay cố định.
-            // Frida -f thêm ~2s trước resume → Unity kịp load → menu hiện.
-            // Mở thường thiếu delay đó → LQBypass chạy quá sớm → race.
-            // Fix: thử mỗi 1s cho đến khi UnityDefaultViewController xuất hiện.
-            __block int attempt = 0;
-            __block dispatch_source_t timer = dispatch_source_create(
-                DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-            dispatch_source_set_timer(timer,
-                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                (uint64_t)(1.0 * NSEC_PER_SEC), 0);
-            dispatch_source_set_event_handler(timer, ^{
-                attempt++;
-                // Kiểm tra Unity view controller đã ready chưa
-                UIViewController *root = [UIApplication sharedApplication]
-                    .keyWindow.rootViewController;
-                NSString *clsName = root ? NSStringFromClass([root class]) : @"nil";
-                BOOL unityReady = (root != nil &&
-                    ([clsName containsString:@"Unity"] ||
-                     [clsName containsString:@"Game"]  ||
-                     attempt >= 8)); // Timeout sau 8s bất kể
-                lq_log(@"⏳ Poll #%d — rootVC: %@%@",
-                       attempt, clsName, unityReady ? @" ✅ READY" : @"");
-                if (unityReady) {
-                    dispatch_source_cancel(timer);
-                    timer = nil;
-                    spawn_menu();
-                }
+            lq_log(@"⚡ Log window ready — spawn sau 1s...");
+            // Controller AWSS3 tồn tại ngay từ applicationDidFinishLaunching.
+            // Không cần chờ Unity — chỉ cần 1s để UIWindow ổn định.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                spawn_menu();
             });
-            dispatch_resume(timer);
         });
     });
 }
@@ -482,47 +458,15 @@ static void hook_makeKeyAndVisible(id self, SEL _cmd) {
 // =========================================================
 __attribute__((constructor))
 static void lq_init(void) {
-    // ⚡ STEALTH TRƯỚC TIÊN
+    // ⚡ STEALTH TRƯỚC TIÊN — chạy đồng bộ ngay khi dylib load
+    // Đảm bảo anogs chưa kịp quét thì hook đã được cài
     install_stealth_hooks();
 
-    // 🛡 BẪY WATCHDOG
+    // 🛡 BẪY WATCHDOG — hook exit/abort/kill trước khi Constructor 6 watchdog timer kịp bắn
+    // Đây chính là lý do menu hiện khi chạy Frida termination observer
     install_termination_hooks();
 
-    // 🚀 EARLY DRAW HOOK — poll ngay từ constructor, không chờ makeKeyAndVisible
-    // Frida -f tạm dừng app → hook sẵn trước AWSS3 reset. Mình làm tương tự.
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        // Bước 1: Chờ class tXGBBDJNKKzPYcSGmlav tồn tại → tính slide sớm
-        uintptr_t slide = 0;
-        for (int i = 0; i < 200 && !slide; i++) { // tối đa 20s
-            usleep(100000); // 100ms
-            Class cls = objc_getClass("tXGBBDJNKKzPYcSGmlav");
-            if (cls) {
-                Method m = class_getInstanceMethod(cls, NSSelectorFromString(@"initTapGes"));
-                if (m) {
-                    IMP imp = method_getImplementation(m);
-                    if (imp) slide = (uintptr_t)imp - 0x02F04DC4;
-                }
-            }
-        }
-        if (!slide) { NSLog(@"[LQBypass] ❌ early: slide fail"); return; }
-        NSLog(@"[LQBypass] ✅ early: slide=0x%lX", slide);
-
-        // Bước 2: Chờ ImGuiDrawView tồn tại → hook drawInMTKView: ngay lập tức
-        __block BOOL drawHooked = NO;
-        for (int i = 0; i < 100 && !drawHooked; i++) {
-            usleep(100000);
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                Class imgCls = objc_getClass("ImGuiDrawView");
-                if (imgCls) {
-                    install_draw_hook(slide);
-                    drawHooked = YES;
-                }
-            });
-        }
-        if (!drawHooked) { NSLog(@"[LQBypass] ❌ early: ImGuiDrawView not found"); }
-    });
-
-    // Hook UIWindow — vẫn giữ để setup log window và spawn_menu (tạo UI nút)
+    // Hook UIWindow để đợi UI sẵn sàng
     dispatch_async(dispatch_get_main_queue(), ^{
         Class winCls = objc_getClass("UIWindow");
         if (winCls) {
@@ -534,4 +478,3 @@ static void lq_init(void) {
         }
     });
 }
-

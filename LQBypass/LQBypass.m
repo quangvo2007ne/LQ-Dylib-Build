@@ -1,6 +1,7 @@
 // =========================================================================
 //  LQBypass.m — Tweak Dylib Chủ Quản Liên Quân Mobile (AWSS3.framework)
-//  Phiên bản 10.1: Stealth (fishhook) + Direct RAM Bypass
+//  Phiên bản 10.9: ObjC Swizzle drawInMTKView: (không dùng mprotect)
+//  Root cause xác nhận: iOS W^X kill app 22ms sau khi write executable page
 // =========================================================================
 
 #import <Foundation/Foundation.h>
@@ -9,8 +10,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
-#import <sys/mman.h>
-#import <libkern/OSCacheControl.h>
+#import <unistd.h>
 #include "fishhook.h"
 
 // =========================================================

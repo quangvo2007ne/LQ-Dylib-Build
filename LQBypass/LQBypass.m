@@ -43,34 +43,44 @@ static void (*orig_exit)(int) = NULL;
 static void (*orig__exit)(int) = NULL;
 static void (*orig_abort)(void) = NULL;
 static int  (*orig_kill)(pid_t, int) = NULL;
+static int  (*orig_raise)(int) = NULL;
+static int  (*orig_pthread_kill)(pthread_t, int) = NULL;
 
 static void hook_exit(int code) {
-    // Nuốt lệnh exit từ watchdog — không cho nó tắt process
-    NSLog(@"[LQBypass] 🛡 hook_exit(%d) bị chặn!", code);
+    NSLog(@"[LQBypass] 🛡 hook_exit(%d) chặn!", code);
 }
 static void hook__exit(int code) {
-    NSLog(@"[LQBypass] 🛡 hook__exit(%d) bị chặn!", code);
+    NSLog(@"[LQBypass] 🛡 hook__exit(%d) chặn!", code);
 }
 static void hook_abort(void) {
-    NSLog(@"[LQBypass] 🛡 hook_abort() bị chặn!");
+    NSLog(@"[LQBypass] 🛡 hook_abort() chặn!");
 }
 static int hook_kill(pid_t pid, int sig) {
     if (pid == getpid()) {
-        // Tự kill chính mình = watchdog cố tắt game
-        NSLog(@"[LQBypass] 🛡 hook_kill(self, %d) bị chặn!", sig);
+        NSLog(@"[LQBypass] 🛡 hook_kill(self,%d) chặn!", sig);
         return 0;
     }
     return orig_kill ? orig_kill(pid, sig) : 0;
 }
+static int hook_raise(int sig) {
+    NSLog(@"[LQBypass] 🛡 hook_raise(%d) chặn!", sig);
+    return 0;
+}
+static int hook_pthread_kill(pthread_t t, int sig) {
+    NSLog(@"[LQBypass] 🛡 hook_pthread_kill(%d) chặn!", sig);
+    return 0;
+}
 
 static void install_termination_hooks(void) {
     struct rebinding hooks[] = {
-        {"exit",   (void *)hook_exit,   (void **)&orig_exit},
-        {"_exit",  (void *)hook__exit,  (void **)&orig__exit},
-        {"abort",  (void *)hook_abort,  (void **)&orig_abort},
-        {"kill",   (void *)hook_kill,   (void **)&orig_kill},
+        {"exit",         (void *)hook_exit,         (void **)&orig_exit},
+        {"_exit",        (void *)hook__exit,        (void **)&orig__exit},
+        {"abort",        (void *)hook_abort,        (void **)&orig_abort},
+        {"kill",         (void *)hook_kill,         (void **)&orig_kill},
+        {"raise",        (void *)hook_raise,        (void **)&orig_raise},
+        {"pthread_kill", (void *)hook_pthread_kill, (void **)&orig_pthread_kill},
     };
-    rebind_symbols(hooks, 4);
+    rebind_symbols(hooks, 6);
 }
 
 

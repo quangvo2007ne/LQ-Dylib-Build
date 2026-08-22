@@ -458,23 +458,18 @@ static void hook_makeKeyAndVisible(id self, SEL _cmd) {
 // =========================================================
 __attribute__((constructor))
 static void lq_init(void) {
-    // ⚡ STEALTH TRƯỚC TIÊN — chạy đồng bộ ngay khi dylib load
-    // Đảm bảo anogs chưa kịp quét thì hook đã được cài
     install_stealth_hooks();
-
-    // 🛡 BẪY WATCHDOG — hook exit/abort/kill trước khi Constructor 6 watchdog timer kịp bắn
-    // Đây chính là lý do menu hiện khi chạy Frida termination observer
     install_termination_hooks();
 
-    // Hook UIWindow để đợi UI sẵn sàng
-    dispatch_async(dispatch_get_main_queue(), ^{
-        Class winCls = objc_getClass("UIWindow");
-        if (winCls) {
-            Method m = class_getInstanceMethod(winCls, @selector(makeKeyAndVisible));
-            if (m) {
-                orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
-                method_setImplementation(m, (IMP)hook_makeKeyAndVisible);
-            }
+    // Hook makeKeyAndVisible ĐỒNG BỘ ngay trong constructor
+    // (không dùng dispatch_async → tránh race: makeKeyAndVisible fire trước khi hook kịp cài)
+    Class winCls = objc_getClass("UIWindow");
+    if (winCls) {
+        Method m = class_getInstanceMethod(winCls, @selector(makeKeyAndVisible));
+        if (m) {
+            orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_makeKeyAndVisible);
+            NSLog(@"[LQBypass] ✅ hook makeKeyAndVisible installed (sync)");
         }
-    });
+    }
 }

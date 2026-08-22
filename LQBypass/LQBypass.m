@@ -34,6 +34,46 @@ static void install_stealth_hooks(void) {
     rebind_symbols(hooks, 1);
 }
 
+// =========================================================
+// WATCHDOG TERMINATION HOOKS — bẫy exit/abort của AWSS3
+// Frida termination observer hook đúng những hàm này → menu hiện
+// Ta replicate bằng fishhook để không cần Frida
+// =========================================================
+static void (*orig_exit)(int) = NULL;
+static void (*orig__exit)(int) = NULL;
+static void (*orig_abort)(void) = NULL;
+static int  (*orig_kill)(pid_t, int) = NULL;
+
+static void hook_exit(int code) {
+    // Nuốt lệnh exit từ watchdog — không cho nó tắt process
+    NSLog(@"[LQBypass] 🛡 hook_exit(%d) bị chặn!", code);
+}
+static void hook__exit(int code) {
+    NSLog(@"[LQBypass] 🛡 hook__exit(%d) bị chặn!", code);
+}
+static void hook_abort(void) {
+    NSLog(@"[LQBypass] 🛡 hook_abort() bị chặn!");
+}
+static int hook_kill(pid_t pid, int sig) {
+    if (pid == getpid()) {
+        // Tự kill chính mình = watchdog cố tắt game
+        NSLog(@"[LQBypass] 🛡 hook_kill(self, %d) bị chặn!", sig);
+        return 0;
+    }
+    return orig_kill ? orig_kill(pid, sig) : 0;
+}
+
+static void install_termination_hooks(void) {
+    struct rebinding hooks[] = {
+        {"exit",   (void *)hook_exit,   (void **)&orig_exit},
+        {"_exit",  (void *)hook__exit,  (void **)&orig__exit},
+        {"abort",  (void *)hook_abort,  (void **)&orig_abort},
+        {"kill",   (void *)hook_kill,   (void **)&orig_kill},
+    };
+    rebind_symbols(hooks, 4);
+}
+
+
 // Forward declaration (định nghĩa đầy đủ ở bên dưới)
 static void lq_log(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 
@@ -410,6 +450,10 @@ static void lq_init(void) {
     // ⚡ STEALTH TRƯỚC TIÊN — chạy đồng bộ ngay khi dylib load
     // Đảm bảo anogs chưa kịp quét thì hook đã được cài
     install_stealth_hooks();
+
+    // 🛡 BẪY WATCHDOG — hook exit/abort/kill trước khi Constructor 6 watchdog timer kịp bắn
+    // Đây chính là lý do menu hiện khi chạy Frida termination observer
+    install_termination_hooks();
 
     // Hook UIWindow để đợi UI sẵn sàng
     dispatch_async(dispatch_get_main_queue(), ^{

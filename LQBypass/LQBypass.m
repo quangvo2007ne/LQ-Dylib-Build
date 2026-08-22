@@ -441,17 +441,37 @@ static void (*orig_makeKeyAndVisible)(id, SEL);
 static void hook_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
 
-    // Chỉ setup log window 1 lần sau window đầu tiên makeKey
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
+    // Dùng makeKeyAndVisible chỉ để setup log window sớm
+    static dispatch_once_t logOnce;
+    dispatch_once(&logOnce, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             setup_log_window();
-            lq_log(@"⚡ Log window ready, sẽ spawn menu sau 2.5s...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+            lq_log(@"⚡ Log window ready — chờ app fully active rồi spawn menu...");
+        });
+    });
+}
+
+// Observer UIApplicationDidBecomeActive — trigger chính xác hơn makeKeyAndVisible
+// Unity thực sự sẵn sàng sau lần didBecomeActive thứ 2 (sau loading screen)
+static int s_active_count = 0;
+static void on_app_did_become_active(CFNotificationCenterRef c,
+                                     void *o, CFStringRef n,
+                                     const void *obj, CFDictionaryRef i) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        s_active_count++;
+        lq_log(@"📱 didBecomeActive #%d", s_active_count);
+
+        // Lần 1: app mới start (loading screen), còn quá sớm
+        // Lần 2+: game thực sự đang chạy → spawn menu sau 6s
+        if (s_active_count >= 1 && !menu_spawned) {
+            double delay = (s_active_count == 1) ? 6.0 : 3.0;
+            lq_log(@"⏳ Sẽ spawn menu sau %.0fs...", delay);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                           (int64_t)(delay * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 spawn_menu();
             });
-        });
+        }
     });
 }
 
@@ -467,6 +487,16 @@ static void lq_init(void) {
     // 🛡 BẪY WATCHDOG — hook exit/abort/kill trước khi Constructor 6 watchdog timer kịp bắn
     // Đây chính là lý do menu hiện khi chạy Frida termination observer
     install_termination_hooks();
+
+    // 📱 Lắng nghe UIApplicationDidBecomeActive — trigger chính xác khi game sẵn sàng
+    CFNotificationCenterAddObserver(
+        CFNotificationCenterGetLocalCenter(),
+        NULL,
+        on_app_did_become_active,
+        CFSTR("UIApplicationDidBecomeActiveNotification"),
+        NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately
+    );
 
     // Hook UIWindow để đợi UI sẵn sàng
     dispatch_async(dispatch_get_main_queue(), ^{

@@ -90,80 +90,27 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [4A] Hide 8PoolHack.dylib from _dyld_image_count / _dyld_get_image_name
-//      Promon SHIELD scans all loaded images and flags unknown dylibs.
-//      We replace the dyld query functions so our dylib is invisible.
+// [4] Block Promon SHIELD alert via UIAlertController.viewDidAppear: swizzle
+//     Fires after alert is fully presented → UIKit state clean → safe dismiss.
+//     Fingerprint: Promon's REF code is always in message (e.g. "REF: 6960,")
 // ─────────────────────────────────────────────────────────────────────────────
-static uint32_t (*orig_dyld_image_count)(void) = NULL;
-static const char *(*orig_dyld_get_image_name)(uint32_t) = NULL;
-
-// Index remapping table: maps "virtual" index → real dyld index, skipping ours
-static uint32_t g_dyld_map[4096];
-static uint32_t g_dyld_visible_count = 0;
-static BOOL g_dyld_map_built = NO;
-
-static void rebuild_dyld_map(void) {
-    // Must use orig_ pointers — calling _dyld_get_image_name here would recurse
-    uint32_t real_count = orig_dyld_image_count ? orig_dyld_image_count() : 0;
-    g_dyld_visible_count = 0;
-    for (uint32_t i = 0; i < real_count && g_dyld_visible_count < 4095; i++) {
-        const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(i) : NULL;
-        if (name && strstr(name, "8PoolHack")) {
-            HLog(@"[DYLD] Hiding image %d: %s", i, name);
-            continue;
-        }
-        g_dyld_map[g_dyld_visible_count++] = i;
-    }
-    g_dyld_map_built = YES;
-}
-
-static uint32_t fake_dyld_image_count(void) {
-    if (!g_dyld_map_built) rebuild_dyld_map();
-    return g_dyld_visible_count;
-}
-
-static const char *fake_dyld_get_image_name(uint32_t idx) {
-    if (!g_dyld_map_built) rebuild_dyld_map();
-    if (idx >= g_dyld_visible_count) return NULL;
-    uint32_t real_idx = g_dyld_map[idx];
-    // Use orig pointer to avoid recursing back into ourselves
-    return orig_dyld_get_image_name ? orig_dyld_get_image_name(real_idx) : NULL;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [4B] Block Promon SHIELD alert dialog via UIViewController swizzle
-//      Promon presents a UIAlertController with text containing
-//      "security threat" / "attack" / "REF:". We detect and dismiss it.
-// ─────────────────────────────────────────────────────────────────────────────
-static IMP orig_presentVC = NULL;
-
-static void fake_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL animated, void(^completion)(void)) {
-    // ALWAYS call original first — skipping it leaves UIKit in broken state (no touch input)
-    ((void(*)(id,SEL,UIViewController*,BOOL,void(^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
-
-    // After presenting, check if it is a Promon SHIELD alert and auto-dismiss
-    if ([vc isKindOfClass:[UIAlertController class]]) {
-        UIAlertController *alert = (UIAlertController *)vc;
-        NSString *combined = [(alert.title ?: @"") stringByAppendingString:(alert.message ?: @"")];
-        if ([combined containsString:@"REF:"]) {
-            HLog(@"[HOOK] Promon SHIELD alert auto-dismissed: %@", combined);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
-                dispatch_get_main_queue(), ^{
-                    [vc dismissViewControllerAnimated:NO completion:nil];
-                });
-        }
-    }
-}
-
 static void install_promon_alert_hook(void) {
-    Class vcClass = [UIViewController class];
-    SEL presentSel = @selector(presentViewController:animated:completion:);
-    Method m = class_getInstanceMethod(vcClass, presentSel);
-    if (m) {
-        orig_presentVC = method_setImplementation(m, (IMP)fake_presentVC);
-        HLog(@"[HOOK] UIViewController.presentViewController — Promon alert interceptor installed");
-    }
+    Class alertClass = [UIAlertController class];
+    SEL sel = @selector(viewDidAppear:);
+    Method m = class_getInstanceMethod(alertClass, sel);
+    if (!m) { HLog(@"[WARN] UIAlertController.viewDidAppear: not found"); return; }
+    IMP origAppear = method_getImplementation(m);
+    method_setImplementation(m, imp_implementationWithBlock(^(UIAlertController *alertSelf, BOOL anim) {
+        ((void(*)(id,SEL,BOOL))origAppear)(alertSelf, sel, anim);
+        NSString *combined = [(alertSelf.title ?: @"") stringByAppendingString:(alertSelf.message ?: @"")];
+        if ([combined containsString:@"REF:"]) {
+            HLog(@"[HOOK] Promon SHIELD alert dismissed in viewDidAppear: %@", combined);
+            [alertSelf dismissViewControllerAnimated:NO completion:nil];
+        }
+    }));
+    HLog(@"[HOOK] UIAlertController.viewDidAppear: hooked (Promon SHIELD interceptor)");
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [4][5] ObjC swizzles: PPEnterKeyView + PPAPIKey
@@ -245,16 +192,14 @@ __attribute__((constructor)) static void hack_init(void) {
     HLog(@"=== 8PoolHack loaded pid=%d ===", getpid());
 
     // [1][2][3] C-level hooks via fishhook (GOT rebinding)
-    // Includes Promon SHIELD bypass: exit/_exit + dyld image list spoofing
     struct rebinding hooks[] = {
-        {"abort",                fake_abort,               (void **)&orig_abort},
-        {"sysctl",               fake_sysctl,              (void **)&orig_sysctl},
-        {"sysctlbyname",         fake_sysctlbyname,        (void **)&orig_sysctlbyname},
-        {"_dyld_image_count",    fake_dyld_image_count,    (void **)&orig_dyld_image_count},
-        {"_dyld_get_image_name", fake_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
+        {"abort",         fake_abort,         (void **)&orig_abort},
+        {"sysctl",        fake_sysctl,        (void **)&orig_sysctl},
+        {"sysctlbyname",  fake_sysctlbyname,  (void **)&orig_sysctlbyname},
     };
     rebind_symbols(hooks, sizeof(hooks) / sizeof(hooks[0]));
-    HLog(@"[INIT] fishhook: abort+sysctl+dyld_image hooked");
+    HLog(@"[INIT] fishhook: abort+sysctl+sysctlbyname hooked");
+
 
     // Install Promon SHIELD alert interceptor on main thread
     dispatch_async(dispatch_get_main_queue(), ^{

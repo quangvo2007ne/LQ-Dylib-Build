@@ -5,8 +5,11 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  build-lqbypass:
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -18,9 +21,37 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Upload Dylib Artifact
+      - name: Upload LQBypass Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LQBypass-Dylib
           path: LQBypass/LQBypass.dylib
           if-no-files-found: error
+
+  build-ppbypass:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile PPBypass.dylib
+        run: |
+          cd PPBypass
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload PPBypass Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPBypass-Dylib
+          path: PPBypass/PPBypass.dylib
+          if-no-files-found: error
+
+      - name: Publish PPBypass to Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: latest
+          name: Latest iOS Dylibs
+          files: PPBypass/PPBypass.dylib
+        continue-on-error: true

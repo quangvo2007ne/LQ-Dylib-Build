@@ -18,7 +18,9 @@
 // No separate menu builder call is needed — the menu lives in libfluorite, not libloader.
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "CustomModMenu.h"
 #include <dlfcn.h>
 #include <string.h>
 #include <stdint.h>
@@ -161,8 +163,6 @@ static void log_loaded_images(void) {
         }
     }
 }
-
-#import "CustomModMenu.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor

@@ -17,6 +17,7 @@ clang -isysroot "$SDK_PATH" \
       -framework Foundation \
       -framework UIKit \
       -framework QuartzCore \
+      -framework CoreGraphics \
       -fobjc-arc \
       -O2 \
       -o 8PoolHack.dylib \

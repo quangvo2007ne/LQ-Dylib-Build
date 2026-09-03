@@ -108,11 +108,11 @@ static uint32_t g_dyld_visible_count = 0;
 static BOOL g_dyld_map_built = NO;
 
 static void rebuild_dyld_map(void) {
-    uint32_t real_count = orig_dyld_image_count ? orig_dyld_image_count() : _dyld_image_count();
+    // Must use orig_ pointers — calling _dyld_get_image_name here would recurse
+    uint32_t real_count = orig_dyld_image_count ? orig_dyld_image_count() : 0;
     g_dyld_visible_count = 0;
     for (uint32_t i = 0; i < real_count && g_dyld_visible_count < 4095; i++) {
-        const char *name = _dyld_get_image_name(i);
-        // Hide our own dylib from Promon's scan
+        const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(i) : NULL;
         if (name && strstr(name, "8PoolHack")) {
             HLog(@"[DYLD] Hiding image %d: %s", i, name);
             continue;
@@ -131,7 +131,8 @@ static const char *fake_dyld_get_image_name(uint32_t idx) {
     if (!g_dyld_map_built) rebuild_dyld_map();
     if (idx >= g_dyld_visible_count) return NULL;
     uint32_t real_idx = g_dyld_map[idx];
-    return _dyld_get_image_name(real_idx);
+    // Use orig pointer to avoid recursing back into ourselves
+    return orig_dyld_get_image_name ? orig_dyld_get_image_name(real_idx) : NULL;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

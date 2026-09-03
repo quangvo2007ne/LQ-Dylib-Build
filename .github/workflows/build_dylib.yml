@@ -12,15 +12,12 @@ jobs:
   build-lqbypass:
     runs-on: macos-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Compile LQBypass.dylib
         run: |
           cd LQBypass
           chmod +x build.sh
           ./build.sh
-
       - name: Upload LQBypass Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -31,15 +28,12 @@ jobs:
   build-ppbypass:
     runs-on: macos-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Compile PPBypass.dylib
         run: |
           cd PPBypass
           chmod +x build.sh
           ./build.sh
-
       - name: Upload PPBypass Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -47,11 +41,27 @@ jobs:
           path: PPBypass/PPBypass.dylib
           if-no-files-found: error
 
-      - name: Publish PPBypass to Release
+  build-8poolhack:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile 8PoolHack.dylib
+        run: |
+          cd 8PoolHack
+          chmod +x build.sh
+          ./build.sh
+      - name: Upload 8PoolHack Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8PoolHack-Dylib
+          path: 8PoolHack/8PoolHack.dylib
+          if-no-files-found: error
+      - name: Publish to Release
         uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
           tag_name: latest
           name: Latest iOS Dylibs
-          files: PPBypass/PPBypass.dylib
+          files: |
+            8PoolHack/8PoolHack.dylib
+            PPBypass/PPBypass.dylib
         continue-on-error: true

@@ -1,15 +1,21 @@
 // 8PoolHack.m
-// Standalone hack dylib for 8 Ball Pool iOS (mod baked binaries: libfluorite + libloader)
-// Strategy:
-//   [1] fishhook _abort          → no-op  (blocks ~20s C-level crash from key timeout)
-//   [2] fishhook _sysctl         → strip P_TRACED flag (bypass anti-debug sysctl check)
-//   [3] fishhook _sysctlbyname   → same, belt-and-suspenders
-//   [4] ObjC swizzle PPEnterKeyView.showInView:... → suppress key dialog UI
-//   [5] ObjC swizzle PPAPIKey.exitKey → suppress forced self-exit
-//   [6] After 6s: locate libloader slide → call sub_52901C (menu builder) directly
+// Standalone bypass dylib for 8 Ball Pool iOS mod (libfluorite + libloader)
 //
-// All offsets are compile-time (file) offsets from static analysis of the original binaries.
-// Runtime addrs = file_offset + ASLR_slide (computed via _dyld_get_image_vmaddr_slide).
+// Architecture (confirmed by static analysis):
+//   libfluorite.dylib (66 MB)   — mod engine: menu UI + game hooks + key gate (PPAPIKey, PPEnterKeyView)
+//   libloader.framework/libloader — Tencent AnoSDK anti-cheat (NOT the mod menu)
+//
+// Strategy:
+//   [1] fishhook _abort        → no-op  (blocks ~20s C-level crash when key validation fails)
+//   [2] fishhook _sysctl       → strip P_TRACED (bypass AnoSDK/libfluorite anti-debug sysctl check)
+//   [3] fishhook _sysctlbyname → same, covers sub_625A24 in libfluorite
+//   [4] ObjC swizzle +[PPEnterKeyView showInView:...] → suppress key entry dialog
+//   [5] ObjC swizzle -[PPAPIKey exitKey]              → suppress forced self-exit on key timeout
+//   [6] ObjC swizzle -[PPAPIKey loading:]             → log key payload for analysis
+//
+// After these hooks are in place, libfluorite's own __mod_init_func constructors
+// (InitFunc_0 through InitFunc_4) run normally and present the mod menu overlay.
+// No separate menu builder call is needed — the menu lives in libfluorite, not libloader.
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -137,43 +143,23 @@ static void install_objc_hooks(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [6] Locate libloader ASLR slide and call menu builder sub_52901C directly
+// [6] Diagnostic: log mod-related loaded images
 //
-//  libloader offsets (from static analysis):
-//    sub_52901C  — creates FloatingMenuButton, UIKitMenuView, ImGuiDrawView
-//    sub_525434  — gate (CRC32 + anti-debug + game hook init)
-//
-//  We skip the gate entirely and call the menu builder function pointer directly.
+// NOTE: libloader = Tencent AnoSDK (NOT the mod menu).
+//       The mod menu is initialized by libfluorite.dylib constructors automatically.
+//       No manual menu bootstrap call is needed.
+//       Exports of libloader confirmed: _AnoSDKInit, _AnoSDKIoctl, _AnoSDKSetUserInfo, etc.
 // ─────────────────────────────────────────────────────────────────────────────
-#define LIBLOADER_MENU_BUILDER_OFFSET  0x52901CUL  // sub_52901C
-
-static intptr_t get_image_slide(const char *partial) {
+static void log_loaded_images(void) {
     uint32_t cnt = _dyld_image_count();
+    HLog(@"[IMG] Loaded images: %d", cnt);
     for (uint32_t i = 0; i < cnt; i++) {
         const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, partial)) {
-            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-            HLog(@"[IMG] '%s' -> slide=0x%lx", partial, (unsigned long)slide);
-            return slide;
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        if (name && (strstr(name, "fluorite") || strstr(name, "loader") || strstr(name, "8PoolHack"))) {
+            HLog(@"[IMG] [%d] slide=0x%lx  %s", i, (unsigned long)slide, name);
         }
     }
-    HLog(@"[WARN] image '%s' not found in dyld list", partial);
-    return 0;
-}
-
-static void trigger_menu(void) {
-    intptr_t slide = get_image_slide("libloader");
-    if (!slide) {
-        HLog(@"[ERR] libloader not found — menu will not appear");
-        return;
-    }
-    uintptr_t menu_fn_addr = (uintptr_t)slide + LIBLOADER_MENU_BUILDER_OFFSET;
-    HLog(@"[MENU] Calling sub_52901C @ 0x%lx (slide=0x%lx + 0x%lx)",
-         (unsigned long)menu_fn_addr, (unsigned long)slide, LIBLOADER_MENU_BUILDER_OFFSET);
-
-    void (*build_menu)(void) = (void (*)(void))menu_fn_addr;
-    build_menu();
-    HLog(@"[MENU] sub_52901C returned — menu builder completed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,7 +177,7 @@ __attribute__((constructor)) static void hack_init(void) {
     rebind_symbols(hooks, sizeof(hooks) / sizeof(hooks[0]));
     HLog(@"[INIT] fishhook: abort + sysctl + sysctlbyname hooked");
 
-    // [4][5] ObjC swizzles — poll until PPAPIKey/PPEnterKeyView classes are available
+    // [4][5] ObjC swizzles — poll until PPAPIKey/PPEnterKeyView classes available
     dispatch_async(dispatch_get_main_queue(), ^{
         __block int tries = 0;
         dispatch_source_t timer = dispatch_source_create(
@@ -208,13 +194,10 @@ __attribute__((constructor)) static void hack_init(void) {
         dispatch_resume(timer);
     });
 
-    // [6] Menu trigger after 6 seconds — game + libloader should be fully loaded by then
+    // [6] Log images after 2s for diagnostic — menu appears via libfluorite constructors automatically
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
         dispatch_get_main_queue(),
-        ^{
-            HLog(@"[MENU] 6s delay done — triggering menu bootstrap...");
-            trigger_menu();
-        }
+        ^{ log_loaded_images(); }
     );
 }

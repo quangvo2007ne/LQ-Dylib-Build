@@ -16,6 +16,7 @@ clang -isysroot "$SDK_PATH" \
       -dynamiclib \
       -framework Foundation \
       -framework UIKit \
+      -framework QuartzCore \
       -fobjc-arc \
       -O2 \
       -o 8PoolHack.dylib \

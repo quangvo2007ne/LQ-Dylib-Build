@@ -6,12 +6,15 @@
 //   libloader.framework/libloader — Tencent AnoSDK anti-cheat (NOT the mod menu)
 //
 // Strategy:
-//   [1] fishhook _abort        → no-op  (blocks ~20s C-level crash when key validation fails)
-//   [2] fishhook _sysctl       → strip P_TRACED (bypass AnoSDK/libfluorite anti-debug sysctl check)
-//   [3] fishhook _sysctlbyname → same, covers sub_625A24 in libfluorite
-//   [4] ObjC swizzle +[PPEnterKeyView showInView:...] → suppress key entry dialog
-//   [5] ObjC swizzle -[PPAPIKey exitKey]              → suppress forced self-exit on key timeout
-//   [6] ObjC swizzle -[PPAPIKey loading:]             → log key payload for analysis
+//   [1] fishhook _abort              → no-op (blocks C-level crash from key timeout)
+//   [2] fishhook _sysctl             → strip P_TRACED (bypass anti-debug sysctl check)
+//   [3] fishhook _sysctlbyname       → same, covers sub_625A24 in libfluorite
+//   [4] ObjC swizzle PPEnterKeyView  → suppress key entry dialog
+//   [5] ObjC swizzle PPAPIKey.exitKey → suppress forced self-exit
+//   [6] ObjC swizzle PPAPIKey.loading: → log key payload
+//   [7] fishhook _AnoSDKGetReportData → return 0 (no anomaly data sent)
+//   [8] fishhook _AnoSDKInit          → no-op (prevents AnoSDK from initializing detection)
+//   [9] swizzle UIViewController presentViewController → block security alert dialogs
 //
 // After these hooks are in place, libfluorite's own __mod_init_func constructors
 // (InitFunc_0 through InitFunc_4) run normally and present the mod menu overlay.
@@ -145,6 +148,45 @@ static void install_objc_hooks(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// [9] Swizzle UIViewController.presentViewController to block AnoSDK alert dialogs
+//
+// AnoSDK shows alerts via standard UIAlertController when it detects:
+//   REF 7215 — foreign dylib in image list
+//   REF 6960 — code signature mismatch (re-sign by Sideloadly)
+// We intercept presentViewController, check message content, and drop it.
+// ─────────────────────────────────────────────────────────────────────────────
+static IMP orig_presentVC = NULL;
+static void fake_presentVC(UIViewController *self, UIViewController *vc,
+                           BOOL animated, void (^completion)(void)) {
+    if ([vc isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)vc;
+        NSString *msg = alert.message ?: @"";
+        // Block any AnoSDK / anti-tamper security alerts by known keywords
+        if ([msg containsString:@"security threat"] ||
+            [msg containsString:@"attack on this"] ||
+            [msg containsString:@"app will close"] ||
+            [msg containsString:@"Support REF:"] ||
+            [msg containsString:@"contact your administrator"]) {
+            HLog(@"[BLOCK] AnoSDK alert suppressed: %@", msg);
+            if (completion) completion();
+            return;
+        }
+    }
+    ((void(*)(id,SEL,id,BOOL,void(^)(void)))orig_presentVC)(
+        self, @selector(presentViewController:animated:completion:), vc, animated, completion);
+}
+
+static void install_alert_suppressor(void) {
+    Class vcClass = [UIViewController class];
+    SEL sel = @selector(presentViewController:animated:completion:);
+    Method m = class_getInstanceMethod(vcClass, sel);
+    if (m) {
+        orig_presentVC = method_setImplementation(m, (IMP)fake_presentVC);
+        HLog(@"[HOOK] UIViewController.presentViewController: → AnoSDK alert filter installed");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // [6] Diagnostic: log mod-related loaded images
 //
 // NOTE: libloader = Tencent AnoSDK (NOT the mod menu).
@@ -170,14 +212,31 @@ static void log_loaded_images(void) {
 __attribute__((constructor)) static void hack_init(void) {
     HLog(@"=== 8PoolHack loaded pid=%d ===", getpid());
 
-    // [1][2][3] C-level hooks via fishhook (GOT rebinding)
+    // [1][2][3][7][8] C-level hooks via fishhook (GOT rebinding)
+    static int fake_anosdk_init(uint32_t gameId, const char *appKey) {
+        HLog(@"[BLOCK] _AnoSDKInit called — suppressed (gameId=%u)", gameId);
+        return 0;
+    }
+    static int fake_anosdk_report(void *buf, uint32_t *len) {
+        HLog(@"[BLOCK] _AnoSDKGetReportData called — returning empty");
+        if (len) *len = 0;
+        return 0;
+    }
     struct rebinding hooks[] = {
-        {"abort",         fake_abort,         (void **)&orig_abort},
-        {"sysctl",        fake_sysctl,         (void **)&orig_sysctl},
-        {"sysctlbyname",  fake_sysctlbyname,   (void **)&orig_sysctlbyname},
+        {"abort",                fake_abort,           (void **)&orig_abort},
+        {"sysctl",               fake_sysctl,          (void **)&orig_sysctl},
+        {"sysctlbyname",         fake_sysctlbyname,    (void **)&orig_sysctlbyname},
+        {"AnoSDKInit",           fake_anosdk_init,     NULL},
+        {"AnoSDKGetReportData",  fake_anosdk_report,   NULL},
+        {"AnoSDKGetReportData2", fake_anosdk_report,   NULL},
+        {"AnoSDKGetReportData3", fake_anosdk_report,   NULL},
+        {"AnoSDKGetReportData4", fake_anosdk_report,   NULL},
     };
     rebind_symbols(hooks, sizeof(hooks) / sizeof(hooks[0]));
-    HLog(@"[INIT] fishhook: abort + sysctl + sysctlbyname hooked");
+    HLog(@"[INIT] fishhook: abort+sysctl+sysctlbyname+AnoSDK hooks installed");
+
+    // [9] Alert suppressor — must run on main thread immediately
+    dispatch_async(dispatch_get_main_queue(), ^{ install_alert_suppressor(); });
 
     // [4][5] ObjC swizzles — poll until PPAPIKey/PPEnterKeyView classes available
     dispatch_async(dispatch_get_main_queue(), ^{

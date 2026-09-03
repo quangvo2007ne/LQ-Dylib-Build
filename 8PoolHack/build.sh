@@ -19,7 +19,7 @@ clang -isysroot "$SDK_PATH" \
       -fobjc-arc \
       -O2 \
       -o 8PoolHack.dylib \
-      8PoolHack.m fishhook.c
+      8PoolHack.m CustomModMenu.m fishhook.c
 
 codesign -f -s - 8PoolHack.dylib || true
 

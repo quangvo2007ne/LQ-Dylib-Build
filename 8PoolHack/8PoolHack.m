@@ -162,6 +162,8 @@ static void log_loaded_images(void) {
     }
 }
 
+#import "CustomModMenu.h"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,10 +196,14 @@ __attribute__((constructor)) static void hack_init(void) {
         dispatch_resume(timer);
     });
 
-    // [6] Log images after 2s for diagnostic — menu appears via libfluorite constructors automatically
+    // [6] Hiển thị UI Mod Menu tự thiết kế (Dark Glassmorphism) sau 3 giây
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
         dispatch_get_main_queue(),
-        ^{ log_loaded_images(); }
+        ^{
+            log_loaded_images();
+            [[CustomModMenu sharedInstance] showFloatingButton];
+            HLog(@"[UI] Custom Mod Menu Floating Button initialized!");
+        }
     );
 }

@@ -207,21 +207,25 @@ static void log_loaded_images(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// [7][8] AnoSDK stub functions (must be at file scope, not nested)
+// ─────────────────────────────────────────────────────────────────────────────
+static int fake_anosdk_init(uint32_t gameId, const char *appKey) {
+    NSLog(@"[8HACK][BLOCK] _AnoSDKInit suppressed (gameId=%u)", gameId);
+    return 0;
+}
+static int fake_anosdk_report(void *buf, uint32_t *len) {
+    NSLog(@"[8HACK][BLOCK] _AnoSDKGetReportData returning empty");
+    if (len) *len = 0;
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ─────────────────────────────────────────────────────────────────────────────
 __attribute__((constructor)) static void hack_init(void) {
     HLog(@"=== 8PoolHack loaded pid=%d ===", getpid());
 
     // [1][2][3][7][8] C-level hooks via fishhook (GOT rebinding)
-    static int fake_anosdk_init(uint32_t gameId, const char *appKey) {
-        HLog(@"[BLOCK] _AnoSDKInit called — suppressed (gameId=%u)", gameId);
-        return 0;
-    }
-    static int fake_anosdk_report(void *buf, uint32_t *len) {
-        HLog(@"[BLOCK] _AnoSDKGetReportData called — returning empty");
-        if (len) *len = 0;
-        return 0;
-    }
     struct rebinding hooks[] = {
         {"abort",                fake_abort,           (void **)&orig_abort},
         {"sysctl",               fake_sysctl,          (void **)&orig_sysctl},

@@ -64,7 +64,7 @@
         self.floatingBtn.titleLabel.font = [UIFont systemFontOfSize:24];
 
         // Đổ bóng (Shadow)
-        self.floatingBtn.layer.shadowColor = [UIColor cyanColor].CGColor;
+        self.floatingBtn.layer.shadowColor = [UIColor colorWithRed:0.0 green:1.0 blue:1.0 alpha:1.0].CGColor;
         self.floatingBtn.layer.shadowOffset = CGSizeMake(0, 0);
         self.floatingBtn.layer.shadowRadius = 8;
         self.floatingBtn.layer.shadowOpacity = 0.8;
@@ -107,7 +107,7 @@
     // Header Title
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 12, width, 30)];
     titleLabel.text = @"🎱 8 BALL POOL HACK";
-    titleLabel.textColor = [UIColor cyanColor];
+    titleLabel.textColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:1.0];
     titleLabel.font = [UIFont boldSystemFontOfSize:18];
     titleLabel.textAlignment = NSTextAlignmentCenter;
     [self.menuView addSubview:titleLabel];

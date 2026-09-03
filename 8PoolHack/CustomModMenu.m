@@ -2,6 +2,8 @@
 // Mod Menu UI tự thiết kế chuẩn iOS (Dark Glassmorphism UI) kết nối Offsets Hack 8 Ball Pool
 
 #import "CustomModMenu.h"
+#import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 #define OFF_AIM_ANGLE           0x00E6B47E

@@ -6,15 +6,12 @@
 //   libloader.framework/libloader — Tencent AnoSDK anti-cheat (NOT the mod menu)
 //
 // Strategy:
-//   [1] fishhook _abort              → no-op (blocks C-level crash from key timeout)
-//   [2] fishhook _sysctl             → strip P_TRACED (bypass anti-debug sysctl check)
-//   [3] fishhook _sysctlbyname       → same, covers sub_625A24 in libfluorite
-//   [4] ObjC swizzle PPEnterKeyView  → suppress key entry dialog
-//   [5] ObjC swizzle PPAPIKey.exitKey → suppress forced self-exit
-//   [6] ObjC swizzle PPAPIKey.loading: → log key payload
-//   [7] fishhook _AnoSDKGetReportData → return 0 (no anomaly data sent)
-//   [8] fishhook _AnoSDKInit          → no-op (prevents AnoSDK from initializing detection)
-//   [9] swizzle UIViewController presentViewController → block security alert dialogs
+//   [1] fishhook _abort        → no-op  (blocks ~20s C-level crash when key validation fails)
+//   [2] fishhook _sysctl       → strip P_TRACED (bypass AnoSDK/libfluorite anti-debug sysctl check)
+//   [3] fishhook _sysctlbyname → same, covers sub_625A24 in libfluorite
+//   [4] ObjC swizzle +[PPEnterKeyView showInView:...] → suppress key entry dialog
+//   [5] ObjC swizzle -[PPAPIKey exitKey]              → suppress forced self-exit on key timeout
+//   [6] ObjC swizzle -[PPAPIKey loading:]             → log key payload for analysis
 //
 // After these hooks are in place, libfluorite's own __mod_init_func constructors
 // (InitFunc_0 through InitFunc_4) run normally and present the mod menu overlay.
@@ -30,6 +27,7 @@
 #include <sys/sysctl.h>
 #include <mach-o/dyld.h>
 #include "fishhook.h"
+#include <stdlib.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logging
@@ -49,16 +47,18 @@ static void HLog(NSString *fmt, ...) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [1] fishhook: abort() → no-op
-//     Prevents ~20-second C-level crash: libfluorite dispatch engine calls
-//     abort() (GOT 0x3F01FA0) when key validation fails. ObjC swizzle cannot
-//     catch this — only a C-level GOT hook works.
+// [1] fishhook: abort() / exit() / _exit() → no-op
+//     Promon SHIELD triggers app termination via exit()/abort() after the alert.
+//     We suppress all three so the game never actually quits.
 // ─────────────────────────────────────────────────────────────────────────────
 static void (*orig_abort)(void) = NULL;
-static void fake_abort(void) {
-    HLog(@"[HOOK] abort() suppressed");
-    // intentionally do nothing — game keeps running
-}
+static void fake_abort(void) { HLog(@"[HOOK] abort() suppressed — Promon/AnoSDK blocked"); }
+
+static void (*orig_exit)(int) = NULL;
+static void fake_exit(int code) { HLog(@"[HOOK] exit(%d) suppressed — Promon SHIELD blocked", code); }
+
+static void (*orig__exit)(int) = NULL;
+static void fake__exit(int code) { HLog(@"[HOOK] _exit(%d) suppressed — Promon SHIELD blocked", code); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [2] fishhook: sysctl → strip P_TRACED from kinfo_proc
@@ -92,6 +92,81 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         if (*pflags & 0x800) { *pflags &= ~(uint32_t)0x800; }
     }
     return r;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [4A] Hide 8PoolHack.dylib from _dyld_image_count / _dyld_get_image_name
+//      Promon SHIELD scans all loaded images and flags unknown dylibs.
+//      We replace the dyld query functions so our dylib is invisible.
+// ─────────────────────────────────────────────────────────────────────────────
+static uint32_t (*orig_dyld_image_count)(void) = NULL;
+static const char *(*orig_dyld_get_image_name)(uint32_t) = NULL;
+
+// Index remapping table: maps "virtual" index → real dyld index, skipping ours
+static uint32_t g_dyld_map[4096];
+static uint32_t g_dyld_visible_count = 0;
+static BOOL g_dyld_map_built = NO;
+
+static void rebuild_dyld_map(void) {
+    uint32_t real_count = orig_dyld_image_count ? orig_dyld_image_count() : _dyld_image_count();
+    g_dyld_visible_count = 0;
+    for (uint32_t i = 0; i < real_count && g_dyld_visible_count < 4095; i++) {
+        const char *name = _dyld_get_image_name(i);
+        // Hide our own dylib from Promon's scan
+        if (name && strstr(name, "8PoolHack")) {
+            HLog(@"[DYLD] Hiding image %d: %s", i, name);
+            continue;
+        }
+        g_dyld_map[g_dyld_visible_count++] = i;
+    }
+    g_dyld_map_built = YES;
+}
+
+static uint32_t fake_dyld_image_count(void) {
+    if (!g_dyld_map_built) rebuild_dyld_map();
+    return g_dyld_visible_count;
+}
+
+static const char *fake_dyld_get_image_name(uint32_t idx) {
+    if (!g_dyld_map_built) rebuild_dyld_map();
+    if (idx >= g_dyld_visible_count) return NULL;
+    uint32_t real_idx = g_dyld_map[idx];
+    return _dyld_get_image_name(real_idx);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [4B] Block Promon SHIELD alert dialog via UIViewController swizzle
+//      Promon presents a UIAlertController with text containing
+//      "security threat" / "attack" / "REF:". We detect and dismiss it.
+// ─────────────────────────────────────────────────────────────────────────────
+static IMP orig_presentVC = NULL;
+
+static void fake_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL animated, void(^completion)(void)) {
+    if ([vc isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)vc;
+        NSString *msg = alert.message ?: @"";
+        NSString *ttl = alert.title ?: @"";
+        NSString *combined = [ttl stringByAppendingString:msg];
+        // Promon SHIELD fingerprint strings
+        if ([combined containsString:@"REF:"] ||
+            [combined containsString:@"security threat"] ||
+            [combined containsString:@"attack"] ||
+            [combined containsString:@"will close"]) {
+            HLog(@"[HOOK] Promon SHIELD alert BLOCKED: %@", combined);
+            return; // drop the alert — never presented
+        }
+    }
+    ((void(*)(id,SEL,UIViewController*,BOOL,void(^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
+}
+
+static void install_promon_alert_hook(void) {
+    Class vcClass = [UIViewController class];
+    SEL presentSel = @selector(presentViewController:animated:completion:);
+    Method m = class_getInstanceMethod(vcClass, presentSel);
+    if (m) {
+        orig_presentVC = method_setImplementation(m, (IMP)fake_presentVC);
+        HLog(@"[HOOK] UIViewController.presentViewController — Promon alert interceptor installed");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,45 +223,6 @@ static void install_objc_hooks(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [9] Swizzle UIViewController.presentViewController to block AnoSDK alert dialogs
-//
-// AnoSDK shows alerts via standard UIAlertController when it detects:
-//   REF 7215 — foreign dylib in image list
-//   REF 6960 — code signature mismatch (re-sign by Sideloadly)
-// We intercept presentViewController, check message content, and drop it.
-// ─────────────────────────────────────────────────────────────────────────────
-static IMP orig_presentVC = NULL;
-static void fake_presentVC(UIViewController *self, UIViewController *vc,
-                           BOOL animated, void (^completion)(void)) {
-    if ([vc isKindOfClass:[UIAlertController class]]) {
-        UIAlertController *alert = (UIAlertController *)vc;
-        NSString *msg = alert.message ?: @"";
-        // Block any AnoSDK / anti-tamper security alerts by known keywords
-        if ([msg containsString:@"security threat"] ||
-            [msg containsString:@"attack on this"] ||
-            [msg containsString:@"app will close"] ||
-            [msg containsString:@"Support REF:"] ||
-            [msg containsString:@"contact your administrator"]) {
-            HLog(@"[BLOCK] AnoSDK alert suppressed: %@", msg);
-            if (completion) completion();
-            return;
-        }
-    }
-    ((void(*)(id,SEL,id,BOOL,void(^)(void)))orig_presentVC)(
-        self, @selector(presentViewController:animated:completion:), vc, animated, completion);
-}
-
-static void install_alert_suppressor(void) {
-    Class vcClass = [UIViewController class];
-    SEL sel = @selector(presentViewController:animated:completion:);
-    Method m = class_getInstanceMethod(vcClass, sel);
-    if (m) {
-        orig_presentVC = method_setImplementation(m, (IMP)fake_presentVC);
-        HLog(@"[HOOK] UIViewController.presentViewController: → AnoSDK alert filter installed");
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // [6] Diagnostic: log mod-related loaded images
 //
 // NOTE: libloader = Tencent AnoSDK (NOT the mod menu).
@@ -207,40 +243,29 @@ static void log_loaded_images(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [7][8] AnoSDK stub functions (must be at file scope, not nested)
-// ─────────────────────────────────────────────────────────────────────────────
-static int fake_anosdk_init(uint32_t gameId, const char *appKey) {
-    NSLog(@"[8HACK][BLOCK] _AnoSDKInit suppressed (gameId=%u)", gameId);
-    return 0;
-}
-static int fake_anosdk_report(void *buf, uint32_t *len) {
-    NSLog(@"[8HACK][BLOCK] _AnoSDKGetReportData returning empty");
-    if (len) *len = 0;
-    return 0;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ─────────────────────────────────────────────────────────────────────────────
 __attribute__((constructor)) static void hack_init(void) {
     HLog(@"=== 8PoolHack loaded pid=%d ===", getpid());
 
-    // [1][2][3][7][8] C-level hooks via fishhook (GOT rebinding)
+    // [1][2][3] C-level hooks via fishhook (GOT rebinding)
+    // Includes Promon SHIELD bypass: exit/_exit + dyld image list spoofing
     struct rebinding hooks[] = {
-        {"abort",                fake_abort,           (void **)&orig_abort},
-        {"sysctl",               fake_sysctl,          (void **)&orig_sysctl},
-        {"sysctlbyname",         fake_sysctlbyname,    (void **)&orig_sysctlbyname},
-        {"AnoSDKInit",           fake_anosdk_init,     NULL},
-        {"AnoSDKGetReportData",  fake_anosdk_report,   NULL},
-        {"AnoSDKGetReportData2", fake_anosdk_report,   NULL},
-        {"AnoSDKGetReportData3", fake_anosdk_report,   NULL},
-        {"AnoSDKGetReportData4", fake_anosdk_report,   NULL},
+        {"abort",                fake_abort,               (void **)&orig_abort},
+        {"exit",                 fake_exit,                (void **)&orig_exit},
+        {"_exit",                fake__exit,               (void **)&orig__exit},
+        {"sysctl",               fake_sysctl,              (void **)&orig_sysctl},
+        {"sysctlbyname",         fake_sysctlbyname,        (void **)&orig_sysctlbyname},
+        {"_dyld_image_count",    fake_dyld_image_count,    (void **)&orig_dyld_image_count},
+        {"_dyld_get_image_name", fake_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
     };
     rebind_symbols(hooks, sizeof(hooks) / sizeof(hooks[0]));
-    HLog(@"[INIT] fishhook: abort+sysctl+sysctlbyname+AnoSDK hooks installed");
+    HLog(@"[INIT] fishhook: abort+exit+sysctl+dyld_image hooked");
 
-    // [9] Alert suppressor — must run on main thread immediately
-    dispatch_async(dispatch_get_main_queue(), ^{ install_alert_suppressor(); });
+    // Install Promon SHIELD alert interceptor on main thread
+    dispatch_async(dispatch_get_main_queue(), ^{
+        install_promon_alert_hook();
+    });
 
     // [4][5] ObjC swizzles — poll until PPAPIKey/PPEnterKeyView classes available
     dispatch_async(dispatch_get_main_queue(), ^{

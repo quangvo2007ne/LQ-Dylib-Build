@@ -54,11 +54,6 @@ static void HLog(NSString *fmt, ...) {
 static void (*orig_abort)(void) = NULL;
 static void fake_abort(void) { HLog(@"[HOOK] abort() suppressed — Promon/AnoSDK blocked"); }
 
-static void (*orig_exit)(int) = NULL;
-static void fake_exit(int code) { HLog(@"[HOOK] exit(%d) suppressed — Promon SHIELD blocked", code); }
-
-static void (*orig__exit)(int) = NULL;
-static void fake__exit(int code) { HLog(@"[HOOK] _exit(%d) suppressed — Promon SHIELD blocked", code); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [2] fishhook: sysctl → strip P_TRACED from kinfo_proc
@@ -143,21 +138,21 @@ static const char *fake_dyld_get_image_name(uint32_t idx) {
 static IMP orig_presentVC = NULL;
 
 static void fake_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL animated, void(^completion)(void)) {
+    // ALWAYS call original first — skipping it leaves UIKit in broken state (no touch input)
+    ((void(*)(id,SEL,UIViewController*,BOOL,void(^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
+
+    // After presenting, check if it is a Promon SHIELD alert and auto-dismiss
     if ([vc isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)vc;
-        NSString *msg = alert.message ?: @"";
-        NSString *ttl = alert.title ?: @"";
-        NSString *combined = [ttl stringByAppendingString:msg];
-        // Promon SHIELD fingerprint strings
-        if ([combined containsString:@"REF:"] ||
-            [combined containsString:@"security threat"] ||
-            [combined containsString:@"attack"] ||
-            [combined containsString:@"will close"]) {
-            HLog(@"[HOOK] Promon SHIELD alert BLOCKED: %@", combined);
-            return; // drop the alert — never presented
+        NSString *combined = [(alert.title ?: @"") stringByAppendingString:(alert.message ?: @"")];
+        if ([combined containsString:@"REF:"]) {
+            HLog(@"[HOOK] Promon SHIELD alert auto-dismissed: %@", combined);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                });
         }
     }
-    ((void(*)(id,SEL,UIViewController*,BOOL,void(^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
 }
 
 static void install_promon_alert_hook(void) {
@@ -253,15 +248,13 @@ __attribute__((constructor)) static void hack_init(void) {
     // Includes Promon SHIELD bypass: exit/_exit + dyld image list spoofing
     struct rebinding hooks[] = {
         {"abort",                fake_abort,               (void **)&orig_abort},
-        {"exit",                 fake_exit,                (void **)&orig_exit},
-        {"_exit",                fake__exit,               (void **)&orig__exit},
         {"sysctl",               fake_sysctl,              (void **)&orig_sysctl},
         {"sysctlbyname",         fake_sysctlbyname,        (void **)&orig_sysctlbyname},
         {"_dyld_image_count",    fake_dyld_image_count,    (void **)&orig_dyld_image_count},
         {"_dyld_get_image_name", fake_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
     };
     rebind_symbols(hooks, sizeof(hooks) / sizeof(hooks[0]));
-    HLog(@"[INIT] fishhook: abort+exit+sysctl+dyld_image hooked");
+    HLog(@"[INIT] fishhook: abort+sysctl+dyld_image hooked");
 
     // Install Promon SHIELD alert interceptor on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
